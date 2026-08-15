@@ -82,7 +82,7 @@ export const AdminTelegramBot: React.FC = () => {
   );
 
   // Connection State
-  const [token, setToken] = useState("8916631530:AAHBL23j73wdS8qUMqwgX-iLutaV0x4tdqw");
+  const [token, setToken] = useState("");
   const [botInfo, setBotInfo] = useState<any>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [isBotEnabled, setIsBotEnabled] = useState(true);
@@ -887,7 +887,7 @@ export const AdminTelegramBot: React.FC = () => {
                   type="text"
                   value={token}
                   onChange={(e) => setToken(e.target.value)}
-                  placeholder="8916631530:AAHBL23j73wdS8qUMqwgX-iLutaV0x4tdqw"
+                  placeholder=""
                   className="w-full rounded-xl border border-slate-200 bg-slate-50 p-3 font-mono text-xs text-slate-900 dark:border-slate-800 dark:bg-slate-800 dark:text-white focus:outline-none focus:border-blue-500"
                   required
                 />

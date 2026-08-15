@@ -973,11 +973,11 @@ ${documentText}
 });
 
 // Official Telegram Bot Active Token & Agency Config
-let activeTelegramToken = process.env.TELEGRAM_BOT_TOKEN || "8916631530:AAHBL23j73wdS8qUMqwgX-iLutaV0x4tdqw";
+let activeTelegramToken = process.env.TELEGRAM_BOT_TOKEN || "";
 
 // Facebook Messenger Config
-let activeFacebookVerifyToken = process.env.FACEBOOK_VERIFY_TOKEN || "fox_agency_secret_123";
-let activeFacebookPageToken = process.env.FACEBOOK_PAGE_TOKEN || "EABAcoO32gPIBSNQj5cYpgz8fdz5ZCH8eiedyViIPxESdT6CWRm4wdHq1xcjwtaaB2IKneqHHVnTl7fzYuh4ZAyyHQXoPxISkgkglTqqQHGJafd9yVU8XipPyI23MI6EfGSZA7SZC1pUj1ZBT5DIRfZCnXLXlTyYxKlecrGISeNGzZBRCpSPUMkE8GZAvZCafJQx1PhYwJH8D7WuKnmDu7MUUstwZDZD";
+let activeFacebookVerifyToken = process.env.FACEBOOK_VERIFY_TOKEN || "";
+let activeFacebookPageToken = process.env.FACEBOOK_PAGE_TOKEN || "";
 
 let agencyBotConfig = {
   botName: "FOX AI Agency Bot",
@@ -2198,20 +2198,27 @@ async function generateAgencyBotReply(userMsg: string): Promise<string> {
     }
   }
 
-  // 3. Check for pricing / plans keywords
-  if (
-    lower.includes("سعر") ||
-    lower.includes("أسعار") ||
-    lower.includes("خطط") ||
-    lower.includes("اشتراك") ||
-    lower.includes("بكام") ||
-    lower.includes("باقات") ||
-    lower.includes("plan") ||
-    lower.includes("price") ||
-    lower.includes("pricing")
-  ) {
-    return agencyBotConfig.pricingPlansText;
-  }
+ // 3. Show fixed pricing ONLY for direct/simple pricing requests
+const directPricingRequests = [
+  "/plans",
+  "plans",
+  "الخطط",
+  "الباقات",
+  "الأسعار",
+  "الاسعار",
+  "الخطط والأسعار",
+  "الخطط والاسعار",
+  "أسعار الباقات",
+  "اسعار الباقات",
+  "بكام",
+  "price",
+  "pricing",
+  "plans and pricing"
+];
+
+if (directPricingRequests.includes(lower)) {
+  return agencyBotConfig.pricingPlansText;
+}
 
   // 4. Check for contact keywords
   if (lower.includes("تواصل") || lower.includes("رقم") || lower.includes("هاتف") || lower.includes("إيميل") || lower.includes("contact")) {
