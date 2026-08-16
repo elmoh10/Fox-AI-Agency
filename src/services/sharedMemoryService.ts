@@ -46,20 +46,36 @@ export class SharedMemoryService {
     try {
       const docRef = doc(db, "workspaces", workspaceId, "shared_memory", sessionId);
       const snap = await getDoc(docRef);
+
+      // Firestore rejects undefined values, so omit agentRole if it is not set.
+      const cleanMessage: ConversationMessage = {
+        sender: message.sender,
+        text: message.text,
+        time: message.time,
+        ...(message.agentRole ? { agentRole: message.agentRole } : {}),
+      };
+
       if (snap.exists()) {
-        await updateDoc(docRef, {
-          messages: arrayUnion(message),
+        const updatePayload: any = {
+          messages: arrayUnion(cleanMessage),
           lastUpdatedAt: new Date().toISOString(),
-          assignedAgent: message.agentRole || snap.data().assignedAgent,
-        });
+        };
+
+        const assignedAgent = message.agentRole || snap.data().assignedAgent;
+        if (assignedAgent) {
+          updatePayload.assignedAgent = assignedAgent;
+        }
+
+        await updateDoc(docRef, updatePayload);
       } else {
         const newCtx: SharedMemoryContext = {
           workspaceId,
           sessionId,
-          messages: [message],
+          messages: [cleanMessage],
           lastUpdatedAt: new Date().toISOString(),
-          assignedAgent: message.agentRole,
+          ...(message.agentRole ? { assignedAgent: message.agentRole } : {}),
         };
+
         await setDoc(docRef, newCtx);
       }
     } catch (err) {

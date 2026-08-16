@@ -2250,6 +2250,12 @@ async function generateWorkspaceTelegramReply(
   );
 }
 
+const workspaceTelegramRatingSessions = new Set<string>();
+
+function getWorkspaceTelegramSessionKey(workspaceId: string, chatId: string) {
+  return `${workspaceId}:${chatId}`;
+}
+
 async function handleWorkspaceTelegramUpdate(
   workspace: any,
   update: any
@@ -2264,6 +2270,12 @@ async function handleWorkspaceTelegramUpdate(
 
   if (!userMsg) return;
 
+  const lower = userMsg.toLowerCase();
+  const sessionKey = getWorkspaceTelegramSessionKey(
+    String(workspace.id),
+    chatId
+  );
+
   const userInfo =
     update.message.from || {
       first_name: update.message.chat.first_name || "Telegram Customer",
@@ -2273,11 +2285,129 @@ async function handleWorkspaceTelegramUpdate(
     `🏢 [Workspace Telegram] ${workspace.name || workspace.id} | ${chatId} (${userInfo.first_name}): "${userMsg}"`
   );
 
+  // -------------------------------------------------------
+  // /start belongs to the tenant business, not Smart Router.
+  // -------------------------------------------------------
+  if (
+    lower === "/start" ||
+    lower === "start" ||
+    lower === "أهلا" ||
+    lower === "اهلا" ||
+    lower === "مرحبا"
+  ) {
+    const businessName = workspace.name || "منشأتنا";
+    const industry = workspace.industry
+      ? ` (${workspace.industry})`
+      : "";
+
+    const welcomeText =
+      `أهلاً بك في ${businessName}${industry} 👋\n\n` +
+      `أنا المساعد الذكي الخاص بالمنشأة. أقدر أساعدك في الاستفسارات والخدمات والأسعار والحجوزات أو الطلبات حسب الخدمات المتاحة لدينا.\n\n` +
+      `اكتب سؤالك مباشرة وسأساعدك.`;
+
+    await callWorkspaceTelegramApi(token, "sendMessage", {
+      chat_id: chatId,
+      text: welcomeText,
+    });
+
+    console.log(
+      `✅ [Workspace Telegram Welcome] ${workspace.name || workspace.id} -> ${chatId}`
+    );
+    return;
+  }
+
+  // -------------------------------------------------------
+  // Explicit rating command
+  // -------------------------------------------------------
+  if (
+    lower === "/rating" ||
+    lower === "rating" ||
+    lower === "تقييم" ||
+    lower === "تقييم الخدمة" ||
+    lower === "تقييم الخدمه"
+  ) {
+    workspaceTelegramRatingSessions.add(sessionKey);
+
+    await callWorkspaceTelegramApi(token, "sendMessage", {
+      chat_id: chatId,
+      text:
+        "⭐ نرجو تقييم تجربتك معنا من 1 إلى 5:\n\n" +
+        "1️⃣ سيئ جداً\n" +
+        "2️⃣ سيئ\n" +
+        "3️⃣ متوسط\n" +
+        "4️⃣ جيد جداً\n" +
+        "5️⃣ ممتاز",
+    });
+
+    return;
+  }
+
+  // -------------------------------------------------------
+  // Rating 1-5 is handled only if the bot is waiting for it.
+  // -------------------------------------------------------
+  if (
+    workspaceTelegramRatingSessions.has(sessionKey) &&
+    ["1", "2", "3", "4", "5"].includes(userMsg)
+  ) {
+    const ratingValue = Number(userMsg);
+
+    const feedback =
+      ratingValue <= 2
+        ? "سئ جداً"
+        : ratingValue === 3
+        ? "وسط"
+        : "رائع جداً";
+
+    registeredServiceRatingsStore.unshift({
+      id: `rat_ws_${Date.now()}`,
+      workspaceId: String(workspace.id),
+      customerName:
+        [userInfo.first_name, userInfo.last_name]
+          .filter(Boolean)
+          .join(" ") || "Telegram Customer",
+      customerPhone: "",
+      channel: "telegram",
+      rating: ratingValue,
+      feedback,
+      createdAt: new Date()
+        .toISOString()
+        .replace("T", " ")
+        .substring(0, 16),
+    });
+
+    workspaceTelegramRatingSessions.delete(sessionKey);
+
+    await callWorkspaceTelegramApi(token, "sendMessage", {
+      chat_id: chatId,
+      text: `⭐ شكراً لتقييمك! تم تسجيل تقييمك ${ratingValue}/5 بنجاح.`,
+    });
+
+    console.log(
+      `⭐ [Workspace Rating] ${workspace.name || workspace.id} -> ${ratingValue}/5`
+    );
+
+    return;
+  }
+
+  // Normal tenant AI flow
   const replyText = await generateWorkspaceTelegramReply(
     workspace,
     chatId,
     userMsg
   );
+
+  // If the AI explicitly asks for a 1-5 rating, remember that state.
+  const normalizedReply = replyText.toLowerCase();
+  if (
+    normalizedReply.includes("تقييم") &&
+    (
+      normalizedReply.includes("1 إلى 5") ||
+      normalizedReply.includes("1 الى 5") ||
+      normalizedReply.includes("1-5")
+    )
+  ) {
+    workspaceTelegramRatingSessions.add(sessionKey);
+  }
 
   const sendResult = await callWorkspaceTelegramApi(
     token,
@@ -2323,7 +2453,9 @@ async function startWorkspaceTelegramPolling(workspaceId: string) {
 
   const existingState = workspaceTelegramPollers.get(workspaceId);
 
-  // Already polling the same token
+  // Already starting or polling the same token.
+  // Reserve the workspace BEFORE any awaited Telegram API calls
+  // so concurrent workspace syncs cannot create duplicate pollers.
   if (
     existingState &&
     existingState.running &&
@@ -2332,15 +2464,30 @@ async function startWorkspaceTelegramPolling(workspaceId: string) {
     return;
   }
 
-  // Token changed: stop old worker first
+  // Token changed: stop old worker first.
   if (existingState) {
     existingState.running = false;
     workspaceTelegramPollers.delete(workspaceId);
   }
 
+  // Reserve immediately to prevent duplicate concurrent starts.
+  const state: WorkspaceTelegramPollingState = {
+    running: true,
+    offset: 0,
+    token,
+  };
+
+  workspaceTelegramPollers.set(workspaceId, state);
+
   const botInfo = await callWorkspaceTelegramApi(token, "getMe");
 
   if (!botInfo?.ok) {
+    state.running = false;
+
+    if (workspaceTelegramPollers.get(workspaceId) === state) {
+      workspaceTelegramPollers.delete(workspaceId);
+    }
+
     console.warn(
       `❌ [Workspace Telegram] Invalid token for ${workspace.name || workspaceId}`
     );
@@ -2351,14 +2498,6 @@ async function startWorkspaceTelegramPolling(workspaceId: string) {
   await callWorkspaceTelegramApi(token, "deleteWebhook", {
     drop_pending_updates: false,
   }).catch(() => {});
-
-  const state: WorkspaceTelegramPollingState = {
-    running: true,
-    offset: 0,
-    token,
-  };
-
-  workspaceTelegramPollers.set(workspaceId, state);
 
   console.log(
     `🤖 [Workspace Telegram Connected] ${workspace.name || workspaceId} -> @${botInfo.result?.username || "unknown_bot"}`
