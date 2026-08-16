@@ -80,6 +80,145 @@ export class AiAgentService {
     return /[\u0600-\u06FF]/.test(text) ? "ar" : "en";
   }
 
+
+  private parseRouterKeywords(raw: string | undefined, defaults: string[]): string[] {
+    if (!raw?.trim()) return defaults;
+
+    return raw
+      .split(/[,،\n]/)
+      .map((k) => k.trim().toLowerCase())
+      .filter(Boolean);
+  }
+
+  private async detectAgentRole(
+    workspace: WorkspaceContext = {},
+    message: string
+  ): Promise<"Sales" | "Support" | "Marketing"> {
+
+    const lower = message.toLowerCase();
+
+    const salesKeywords = this.parseRouterKeywords(
+      workspace.aiSettings?.salesKeywords,
+      [
+        "سعر", "اسعار", "أسعار", "بكام",
+        "شراء", "اشتراك", "باقة", "باقات",
+        "حجز", "احجز", "طلب", "اطلب",
+        "price", "pricing", "buy", "book",
+        "order", "subscribe"
+      ]
+    );
+
+    const supportKeywords = this.parseRouterKeywords(
+      workspace.aiSettings?.supportKeywords,
+      [
+        "شكوى", "مشكلة", "مش شغال", "لا يعمل",
+        "عطل", "مساعدة", "الغاء", "إلغاء",
+        "اتلغى", "تأخير", "متأخر", "استرجاع",
+        "complaint", "issue", "problem", "help",
+        "cancel", "refund", "support"
+      ]
+    );
+
+    const marketingKeywords = this.parseRouterKeywords(
+      workspace.aiSettings?.marketingKeywords,
+      [
+        "عرض", "عروض", "خصم", "خصومات",
+        "كوبون", "برومو", "جديد", "ترشيح",
+        "اقتراح", "offer", "offers", "discount",
+        "promo", "coupon", "recommend"
+      ]
+    );
+
+    const score = (keywords: string[]) =>
+      keywords.reduce(
+        (total, keyword) => total + (lower.includes(keyword) ? 1 : 0),
+        0
+      );
+
+    const scores = {
+      Sales: score(salesKeywords),
+      Support: score(supportKeywords),
+      Marketing: score(marketingKeywords),
+    };
+
+    const highestScore = Math.max(
+      scores.Sales,
+      scores.Support,
+      scores.Marketing
+    );
+
+    const winners = (
+      Object.entries(scores) as Array<
+        ["Sales" | "Support" | "Marketing", number]
+      >
+    ).filter(([, value]) => value === highestScore && value > 0);
+
+    // Clear keyword winner
+    if (winners.length === 1) {
+      return winners[0][0];
+    }
+
+    // Ambiguous message -> Gemini Router
+    const ai = this.getGeminiClient();
+
+    if (ai) {
+      try {
+        const routerPrompt = `
+You are the hidden Smart Agent Router for FOX AI AGENCY.
+
+Classify the customer's message into EXACTLY ONE category.
+
+SALES:
+Pricing, purchasing, subscriptions, NEW bookings,
+placing orders, or purchase intent.
+
+SUPPORT:
+Complaints, problems with an EXISTING booking/order,
+refunds, cancellations, technical issues or dissatisfaction.
+
+MARKETING:
+Offers, discounts, promotions, recommendations,
+upselling or discovering new services.
+
+RULES:
+- NEW booking = SALES
+- Problem with EXISTING booking = SUPPORT
+- Offers or discounts = MARKETING
+- Output ONE WORD ONLY:
+SALES, SUPPORT, or MARKETING
+
+CUSTOM ROUTER INSTRUCTIONS:
+${workspace.aiSettings?.routerPrompt || "None"}
+
+CUSTOMER MESSAGE:
+${message}
+`;
+
+        const result = await ai.models.generateContent({
+          model: "gemini-3.6-flash",
+          contents: routerPrompt,
+          config: { temperature: 0 },
+        });
+
+        const routed = (result.text || "")
+          .trim()
+          .toUpperCase();
+
+        if (routed.includes("MARKETING")) return "Marketing";
+        if (routed.includes("SUPPORT")) return "Support";
+        if (routed.includes("SALES")) return "Sales";
+
+      } catch (err) {
+        console.warn(
+          "Smart Router Gemini classification failed:",
+          err
+        );
+      }
+    }
+
+    return "Support";
+  }
+
   public buildSystemInstruction(
     workspace: WorkspaceContext = {},
     messageLang: "ar" | "en",
@@ -356,7 +495,53 @@ ${industryContext || "Standard business inquiry catalog."}
     
 
     const messageLang = this.detectLanguage(message);
-    const systemInstruction = this.buildSystemInstruction(workspace, messageLang, channel, overrideConfig);
+
+    // FOX Smart Agent Router
+    const agentRole = await this.detectAgentRole(workspace, message);
+
+    const roleConfig: Partial<AiAgentConfig> =
+      agentRole === "Sales"
+        ? {
+            agentName:
+              workspace.aiSettings?.salesAgentName ||
+              "FOX Sales Agent",
+            customPrompt:
+              workspace.aiSettings?.salesAgentPrompt ||
+              "Act as a professional sales consultant. Understand customer needs, recommend the most suitable service, answer pricing accurately and guide the customer naturally toward booking, ordering or subscribing without being pushy.",
+          }
+        : agentRole === "Marketing"
+        ? {
+            agentName:
+              workspace.aiSettings?.marketingAgentName ||
+              "FOX Marketing Agent",
+            customPrompt:
+              workspace.aiSettings?.marketingAgentPrompt ||
+              "Act as a marketing and growth specialist. Explain approved offers and benefits, recommend relevant services and identify ethical upsell opportunities. Never invent discounts.",
+          }
+        : {
+            agentName:
+              workspace.aiSettings?.supportAgentName ||
+              "FOX Support Agent",
+            customPrompt:
+              workspace.aiSettings?.supportAgentPrompt ||
+              "Act as an expert customer support specialist. Diagnose problems, respond empathetically, solve issues using approved business information and escalate when human intervention is required.",
+          };
+
+    const effectiveConfig: Partial<AiAgentConfig> = {
+      ...roleConfig,
+      ...overrideConfig,
+    };
+
+    console.log(
+      `[Smart Router] ${channel} -> ${agentRole}: ${message.substring(0, 120)}`
+    );
+
+    const systemInstruction = this.buildSystemInstruction(
+      workspace,
+      messageLang,
+      channel,
+      effectiveConfig
+    );
 
     const ai = this.getGeminiClient();
 
@@ -566,7 +751,7 @@ ${industryContext || "Standard business inquiry catalog."}
               sender: "bot",
               text: response.text || "...",
               time: new Date().toISOString(),
-              agentRole: "Unknown" // Can be enhanced to parse actual agent
+              agentRole
             });
           }
           

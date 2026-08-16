@@ -1885,12 +1885,17 @@ app.post("/api/agency/clients", (req, res) => {
       registeredWorkspacesStore.unshift(workspace);
     }
   }
+  syncWorkspaceTelegramBots().catch((err) =>
+    console.warn("Workspace Telegram sync warning:", err)
+  );
+
   return res.json({ success: true, clients: registeredWorkspacesStore });
 });
 
 app.delete("/api/agency/clients/:id", (req, res) => {
   const { id } = req.params;
   registeredWorkspacesStore = registeredWorkspacesStore.filter((w) => w.id !== id);
+  stopWorkspaceTelegramPolling(String(id)).catch(() => {});
   return res.json({ success: true, message: "Client workspace deleted", clients: registeredWorkspacesStore });
 });
 
@@ -2181,6 +2186,344 @@ async function callTelegramApi(method: string, body?: any) {
   }
 }
 
+
+// ==========================================================
+// MULTI-TENANT TELEGRAM ENGINE
+// Each client workspace owns its own Telegram Bot Token.
+// The FOX AGENCY main bot remains completely separate.
+// ==========================================================
+
+type WorkspaceTelegramPollingState = {
+  running: boolean;
+  offset: number;
+  token: string;
+};
+
+const workspaceTelegramPollers = new Map<string, WorkspaceTelegramPollingState>();
+
+async function callWorkspaceTelegramApi(
+  token: string,
+  method: string,
+  body?: any
+) {
+  if (!token) return null;
+
+  try {
+    const response = await fetch(
+      `https://api.telegram.org/bot${token}/${method}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: body ? JSON.stringify(body) : undefined,
+      }
+    );
+
+    return await response.json();
+  } catch (err) {
+    console.error(`[Workspace Telegram API] ${method} error:`, err);
+    return null;
+  }
+}
+
+function getWorkspaceById(workspaceId: string) {
+  return registeredWorkspacesStore.find(
+    (workspace) => String(workspace.id) === String(workspaceId)
+  );
+}
+
+async function generateWorkspaceTelegramReply(
+  workspace: any,
+  chatId: string,
+  userMsg: string
+) {
+  const result = await aiAgentService.generateChatResponse({
+    workspace,
+    message: userMsg,
+    channel: "telegram",
+    sessionId: `telegram:${workspace.id}:${chatId}`,
+  });
+
+  return (
+    result?.response ||
+    result?.aiResponse ||
+    "شكراً لتواصلك معنا. كيف يمكننا مساعدتك؟"
+  );
+}
+
+async function handleWorkspaceTelegramUpdate(
+  workspace: any,
+  update: any
+) {
+  if (!update?.message?.chat) return;
+
+  const token = String(workspace.telegramBotToken || "").trim();
+  if (!token) return;
+
+  const chatId = String(update.message.chat.id);
+  const userMsg = String(update.message.text || "").trim();
+
+  if (!userMsg) return;
+
+  const userInfo =
+    update.message.from || {
+      first_name: update.message.chat.first_name || "Telegram Customer",
+    };
+
+  console.log(
+    `🏢 [Workspace Telegram] ${workspace.name || workspace.id} | ${chatId} (${userInfo.first_name}): "${userMsg}"`
+  );
+
+  const replyText = await generateWorkspaceTelegramReply(
+    workspace,
+    chatId,
+    userMsg
+  );
+
+  const sendResult = await callWorkspaceTelegramApi(
+    token,
+    "sendMessage",
+    {
+      chat_id: chatId,
+      text: replyText,
+    }
+  );
+
+  if (sendResult?.ok) {
+    console.log(
+      `✅ [Workspace Telegram Reply] ${workspace.name || workspace.id} -> ${chatId}`
+    );
+  } else {
+    console.warn(
+      `⚠️ [Workspace Telegram Reply Failed] ${workspace.name || workspace.id}`,
+      sendResult
+    );
+  }
+}
+
+async function stopWorkspaceTelegramPolling(workspaceId: string) {
+  const state = workspaceTelegramPollers.get(workspaceId);
+
+  if (state) {
+    state.running = false;
+    workspaceTelegramPollers.delete(workspaceId);
+  }
+}
+
+async function startWorkspaceTelegramPolling(workspaceId: string) {
+  const workspace = getWorkspaceById(workspaceId);
+
+  if (!workspace) return;
+
+  const token = String(workspace.telegramBotToken || "").trim();
+
+  if (!token || workspace.telegramBotStatus === "disconnected") {
+    await stopWorkspaceTelegramPolling(workspaceId);
+    return;
+  }
+
+  const existingState = workspaceTelegramPollers.get(workspaceId);
+
+  // Already polling the same token
+  if (
+    existingState &&
+    existingState.running &&
+    existingState.token === token
+  ) {
+    return;
+  }
+
+  // Token changed: stop old worker first
+  if (existingState) {
+    existingState.running = false;
+    workspaceTelegramPollers.delete(workspaceId);
+  }
+
+  const botInfo = await callWorkspaceTelegramApi(token, "getMe");
+
+  if (!botInfo?.ok) {
+    console.warn(
+      `❌ [Workspace Telegram] Invalid token for ${workspace.name || workspaceId}`
+    );
+    return;
+  }
+
+  // Polling mode requires webhook to be disabled for this client bot.
+  await callWorkspaceTelegramApi(token, "deleteWebhook", {
+    drop_pending_updates: false,
+  }).catch(() => {});
+
+  const state: WorkspaceTelegramPollingState = {
+    running: true,
+    offset: 0,
+    token,
+  };
+
+  workspaceTelegramPollers.set(workspaceId, state);
+
+  console.log(
+    `🤖 [Workspace Telegram Connected] ${workspace.name || workspaceId} -> @${botInfo.result?.username || "unknown_bot"}`
+  );
+
+  const poll = async () => {
+    const current = workspaceTelegramPollers.get(workspaceId);
+
+    if (!current || !current.running || current.token !== token) {
+      return;
+    }
+
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+      const response = await fetch(
+        `https://api.telegram.org/bot${token}/getUpdates?offset=${current.offset}&timeout=3`,
+        { signal: controller.signal }
+      ).catch(() => null);
+
+      clearTimeout(timeoutId);
+
+      if (response?.ok) {
+        const data = await response.json().catch(() => null);
+
+        if (data?.ok && Array.isArray(data.result)) {
+          for (const update of data.result) {
+            current.offset = Math.max(
+              current.offset,
+              Number(update.update_id || 0) + 1
+            );
+
+            const latestWorkspace = getWorkspaceById(workspaceId);
+
+            if (latestWorkspace) {
+              await handleWorkspaceTelegramUpdate(
+                latestWorkspace,
+                update
+              );
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.warn(
+        `[Workspace Telegram Polling] ${workspace.name || workspaceId}:`,
+        err
+      );
+    } finally {
+      const latest = workspaceTelegramPollers.get(workspaceId);
+
+      if (latest?.running && latest.token === token) {
+        setTimeout(poll, 1000);
+      }
+    }
+  };
+
+  poll();
+}
+
+async function syncWorkspaceTelegramBots() {
+  const activeWorkspaceIds = new Set<string>();
+
+  for (const workspace of registeredWorkspacesStore) {
+    if (!workspace?.id) continue;
+
+    const workspaceId = String(workspace.id);
+    const token = String(workspace.telegramBotToken || "").trim();
+
+    if (
+      token.length > 10 &&
+      workspace.telegramBotStatus !== "disconnected"
+    ) {
+      activeWorkspaceIds.add(workspaceId);
+      await startWorkspaceTelegramPolling(workspaceId);
+    } else {
+      await stopWorkspaceTelegramPolling(workspaceId);
+    }
+  }
+
+  // Stop workers for deleted workspaces
+  for (const workspaceId of workspaceTelegramPollers.keys()) {
+    if (!activeWorkspaceIds.has(workspaceId)) {
+      await stopWorkspaceTelegramPolling(workspaceId);
+    }
+  }
+}
+
+// Workspace-specific webhook endpoint.
+// Useful later for production hosting instead of polling.
+app.post(
+  "/api/telegram/webhook/:workspaceId",
+  async (req, res) => {
+    const workspace = getWorkspaceById(req.params.workspaceId);
+
+    if (!workspace) {
+      return res.status(404).json({
+        ok: false,
+        error: "Workspace not found",
+      });
+    }
+
+    try {
+      await handleWorkspaceTelegramUpdate(
+        workspace,
+        req.body
+      );
+
+      return res.json({ ok: true });
+    } catch (err: any) {
+      console.error(
+        "[Workspace Telegram Webhook Error]",
+        err
+      );
+
+      return res.status(500).json({
+        ok: false,
+        error: err?.message || "Webhook processing failed",
+      });
+    }
+  }
+);
+
+// Client workspace Telegram connection status.
+app.get(
+  "/api/telegram/workspace/:workspaceId/status",
+  async (req, res) => {
+    const workspace = getWorkspaceById(req.params.workspaceId);
+
+    if (!workspace) {
+      return res.status(404).json({
+        connected: false,
+        error: "Workspace not found",
+      });
+    }
+
+    const token = String(workspace.telegramBotToken || "").trim();
+
+    if (!token) {
+      return res.json({
+        connected: false,
+        pollingActive: false,
+      });
+    }
+
+    const botInfo = await callWorkspaceTelegramApi(
+      token,
+      "getMe"
+    );
+
+    const state = workspaceTelegramPollers.get(
+      String(workspace.id)
+    );
+
+    return res.json({
+      connected: !!botInfo?.ok,
+      botInfo: botInfo?.ok ? botInfo.result : undefined,
+      pollingActive: !!state?.running,
+      workspaceId: workspace.id,
+      workspaceName: workspace.name,
+    });
+  }
+);
+
 async function generateAgencyBotReply(userMsg: string): Promise<string> {
   const trimmed = (userMsg || "").trim();
   const lower = trimmed.toLowerCase();
@@ -2388,7 +2731,6 @@ app.get("/api/telegram/status", async (req, res) => {
     return res.json({
       connected: true,
       botInfo: data.result,
-      token: activeTelegramToken,
       botEnabled: isBotEnabled,
       pollingActive: isPollingActive && isBotEnabled,
     });
@@ -2396,7 +2738,6 @@ app.get("/api/telegram/status", async (req, res) => {
     return res.json({
       connected: false,
       error: data?.description || "Unable to connect to Telegram Bot API",
-      token: activeTelegramToken,
       botEnabled: isBotEnabled,
       pollingActive: false,
     });

@@ -1832,28 +1832,79 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     addToast("تم حفظ وتحديث إعدادات وكيل الذكاء الاصطناعي بنجاح في Firestore!", "success");
   };
 
-  const updateTelegramBotToken = (workspaceId: string, token: string, botName?: string) => {
+  const updateTelegramBotToken = async (workspaceId: string, token: string, botName?: string) => {
     if (!isSuperAdmin && workspaceId !== currentWorkspace?.id) {
       addToast("ليس لديك صلاحية لتعديل إعدادات هذا الحساب", "error");
       return;
     }
+
     const trimmed = token.trim();
+    const targetWs = workspaces.find((w) => w.id === workspaceId);
+
+    if (!targetWs) {
+      addToast("لم يتم العثور على مساحة العمل", "error");
+      return;
+    }
+
+    const updatedWorkspace = {
+      ...targetWs,
+      telegramBotToken: trimmed,
+      telegramBotName:
+        botName ||
+        targetWs.telegramBotName ||
+        `@${(targetWs.name || "fox_agent").toLowerCase().replace(/\s+/g, "_")}_bot`,
+      telegramBotStatus: trimmed.length > 10 ? "connected" : "disconnected",
+      telegramConnectedAt: trimmed.length > 10 ? new Date().toISOString() : undefined,
+      updatedAt: new Date().toISOString(),
+    };
+
+    // Update local application state immediately
     setWorkspaces((prev) =>
-      prev.map((w) =>
-        w.id === workspaceId
-          ? {
-              ...w,
-              telegramBotToken: trimmed,
-              telegramBotName: botName || w.telegramBotName || `@${(w.name || "fox_agent").toLowerCase().replace(/\s+/g, "_")}_bot`,
-              telegramBotStatus: trimmed.length > 10 ? "connected" : "disconnected",
-            }
-          : w
-      )
+      prev.map((w) => (w.id === workspaceId ? updatedWorkspace : w))
     );
+
+    // Persist Telegram configuration inside this tenant's Firestore workspace
+    try {
+      const wsRef = doc(db, "workspaces", workspaceId);
+
+      await setDoc(
+        wsRef,
+        sanitizeForFirestore({
+          id: workspaceId,
+          telegramBotToken: updatedWorkspace.telegramBotToken,
+          telegramBotName: updatedWorkspace.telegramBotName,
+          telegramBotStatus: updatedWorkspace.telegramBotStatus,
+          telegramConnectedAt: updatedWorkspace.telegramConnectedAt,
+          updatedAt: updatedWorkspace.updatedAt,
+        }),
+        { merge: true }
+      );
+    } catch (err) {
+      console.warn("Firestore Telegram workspace save fallback:", err);
+    }
+
+    // Sync updated workspace immediately with Node backend.
+    // This is required because changing a token does not change workspaces.length.
+    try {
+      const response = await fetch("/api/agency/clients", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspace: updatedWorkspace,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Backend sync failed with HTTP ${response.status}`);
+      }
+    } catch (err) {
+      console.warn("Backend Telegram workspace sync fallback:", err);
+    }
+
     if (trimmed.length > 10) {
-      addToast("تم حفظ Telegram Access Token وربط البوت بنجاح!", "success");
+      addToast("تم حفظ Telegram Access Token وربط بوت المنشأة بنجاح!", "success");
     } else {
-      addToast("تم إلغاء ربط بوت التليجرام.", "info");
+      addToast("تم إلغاء ربط بوت التليجرام الخاص بالمنشأة.", "info");
     }
   };
 
