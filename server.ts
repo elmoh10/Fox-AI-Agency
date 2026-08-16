@@ -811,19 +811,7 @@ app.post("/api/ai/extract-knowledge", async (req, res) => {
 });
 
 
-app.post("/api/ai/extract-knowledge", async (req, res) => {
-  try {
-    const { type, content, url, mimeType } = req.body;
-    if (!type) {
-      return res.status(400).json({ error: "Type is required" });
-    }
-    const result = await aiAgentService.extractKnowledge({ type, content, url, mimeType });
-    res.json(result);
-  } catch (error) {
-    console.error("Extract Knowledge Error:", error);
-    res.status(500).json({ error: error.message || "Failed to extract knowledge" });
-  }
-});
+
 
 app.post("/api/ai/chat", async (req, res) => {
   try {
@@ -922,55 +910,6 @@ Be professional, analytical, and friendly. Provide actionable advice. You can us
   }
 });
 
-// AI Knowledge Base Extraction API (Extract Q&A pairs from uploaded raw documents/text for self-learning review)
-app.post("/api/ai/extract-knowledge", async (req, res) => {
-  try {
-    const { documentText, businessCategory } = req.body;
-    if (!documentText) {
-      return res.status(400).json({ error: "documentText is required" });
-    }
-
-    const ai = getGeminiClient();
-    if (!ai) {
-      // Mock extracted facts if no API key
-      return res.json({
-        extractedFacts: [
-          { question: "What are your business operating hours?", answer: "We are open Sunday through Thursday from 9:00 AM to 10:00 PM.", category: "Hours" },
-          { question: "Where is your location?", answer: "We are located in Cairo, Egypt. Main branch in New Cairo.", category: "Location" },
-          { question: "What payment methods do you accept?", answer: "We accept Cash, Credit Cards, and Instapay.", category: "Payment" }
-        ]
-      });
-    }
-
-    const prompt = `Extract clear FAQ pairs (Question and Answer) suitable for a ${businessCategory || "Business"} customer support AI Agent from the following text.
-Return JSON ONLY as an array of objects with keys "question", "answer", and "category".
-
-TEXT CONTENT:
-${documentText}
-`;
-
-    const response = await generateWithFallback(ai, {
-      contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-      },
-    });
-
-    const resultText = response.text || "[]";
-    let extractedFacts = [];
-    try {
-      extractedFacts = JSON.parse(resultText);
-    } catch {
-      extractedFacts = [];
-    }
-
-    return res.json({ extractedFacts });
-
-  } catch (err: any) {
-    console.error("Knowledge extraction error:", err);
-    return res.status(500).json({ error: "Failed to extract knowledge base facts" });
-  }
-});
 
 // Official Telegram Bot Active Token & Agency Config
 let activeTelegramToken = process.env.TELEGRAM_BOT_TOKEN || "";

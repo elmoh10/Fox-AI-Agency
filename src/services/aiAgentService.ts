@@ -1,5 +1,7 @@
 import { GoogleGenAI, Type } from "@google/genai";
+import OpenAI from "openai";
 import { checkAvailability, bookAppointmentInSheet } from "./googleSheetsService";
+import { workspaceDataService } from "./workspaceDataService";
 import { triggerExternalCRM } from "./crmService";
 import { sharedMemoryService } from "./sharedMemoryService";
 
@@ -65,6 +67,27 @@ export interface ChatResponse {
 }
 
 export class AiAgentService {
+
+  // =========================================================
+  // OPENROUTER CLIENT
+  // Primary AI provider for FOX AI AGENCY
+  // Uses OpenAI-compatible API.
+  // =========================================================
+  private getOpenRouterClient(): OpenAI | null {
+    const apiKey = process.env.OPENROUTER_API_KEY;
+
+    if (!apiKey) return null;
+
+    return new OpenAI({
+      apiKey,
+      baseURL: "https://openrouter.ai/api/v1",
+      defaultHeaders: {
+        "HTTP-Referer": "https://fox-ai-agency.ai.studio/",
+        "X-Title": "FOX AI AGENCY",
+      },
+    });
+  }
+
   private getGeminiClient(): GoogleGenAI | null {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) return null;
@@ -96,6 +119,18 @@ export class AiAgentService {
   ): Promise<"Sales" | "Support" | "Marketing"> {
 
     const lower = message.toLowerCase();
+
+    // Appointment / availability questions are Sales unless
+    // the customer is reporting a problem with an existing booking.
+    const hasAppointmentLanguage =
+      /(موعد|مواعيد|كشف|حجز|appointment|appointments|availability|available)/i.test(lower);
+
+    const hasExistingBookingProblem =
+      /(اتلغ|إلغاء|الغاء|مشكلة|تأخير|متأخر|شكوى|refund|cancel|complaint|problem|issue)/i.test(lower);
+
+    if (hasAppointmentLanguage && !hasExistingBookingProblem) {
+      return "Sales";
+    }
 
     const salesKeywords = this.parseRouterKeywords(
       workspace.aiSettings?.salesKeywords,
@@ -158,19 +193,15 @@ export class AiAgentService {
       return winners[0][0];
     }
 
-    // Ambiguous message -> Gemini Router
-    const ai = this.getGeminiClient();
-
-    if (ai) {
-      try {
-        const routerPrompt = `
+    // Ambiguous message -> AI Router
+    const routerPrompt = `
 You are the hidden Smart Agent Router for FOX AI AGENCY.
 
 Classify the customer's message into EXACTLY ONE category.
 
 SALES:
 Pricing, purchasing, subscriptions, NEW bookings,
-placing orders, or purchase intent.
+appointment availability, placing orders, or purchase intent.
 
 SUPPORT:
 Complaints, problems with an EXISTING booking/order,
@@ -182,6 +213,7 @@ upselling or discovering new services.
 
 RULES:
 - NEW booking = SALES
+- Asking about available appointments = SALES
 - Problem with EXISTING booking = SUPPORT
 - Offers or discounts = MARKETING
 - Output ONE WORD ONLY:
@@ -194,6 +226,49 @@ CUSTOMER MESSAGE:
 ${message}
 `;
 
+    // OpenRouter is the primary router.
+    const openRouter = this.getOpenRouterClient();
+
+    if (openRouter) {
+      try {
+        const result = await openRouter.chat.completions.create({
+          model: process.env.OPENROUTER_MODEL || "openrouter/free",
+          messages: [
+            {
+              role: "system",
+              content:
+                "You are a hidden intent classifier. Output only SALES, SUPPORT, or MARKETING."
+            },
+            {
+              role: "user",
+              content: routerPrompt
+            }
+          ],
+          temperature: 0
+        });
+
+        const routed =
+          String(result.choices?.[0]?.message?.content || "")
+            .trim()
+            .toUpperCase();
+
+        if (routed.includes("MARKETING")) return "Marketing";
+        if (routed.includes("SUPPORT")) return "Support";
+        if (routed.includes("SALES")) return "Sales";
+
+      } catch (err) {
+        console.warn(
+          "Smart Router OpenRouter classification failed:",
+          err
+        );
+      }
+    }
+
+    // Gemini is only the secondary router fallback.
+    const ai = this.getGeminiClient();
+
+    if (ai) {
+      try {
         const result = await ai.models.generateContent({
           model: "gemini-3.6-flash",
           contents: routerPrompt,
@@ -210,7 +285,7 @@ ${message}
 
       } catch (err) {
         console.warn(
-          "Smart Router Gemini classification failed:",
+          "Smart Router Gemini fallback failed:",
           err
         );
       }
@@ -494,10 +569,566 @@ ${industryContext || "Standard business inquiry catalog."}
     const { message, channel = "telegram", chatHistory = [], overrideConfig } = params;
     
 
-    const messageLang = this.detectLanguage(message);
+    let messageLang = this.detectLanguage(message);
+
+    // Phone numbers / numeric-only replies have no language.
+    // Recover the language from recent conversation context.
+    if (!/[A-Za-z\u0600-\u06FF]/.test(message) && workspace?.id && params.sessionId) {
+      try {
+        const languageCtx = await sharedMemoryService.getContext(
+          workspace.id,
+          params.sessionId
+        );
+
+        const previousText = languageCtx.messages
+          .slice()
+          .reverse()
+          .map((m) => m.text || "")
+          .find((text) => /[A-Za-z\u0600-\u06FF]/.test(text));
+
+        if (previousText) {
+          messageLang = this.detectLanguage(previousText);
+        }
+      } catch {
+        // Keep original detection as fallback.
+      }
+    }
+
+    // =========================================================
+    // DETERMINISTIC CUSTOMER APPOINTMENT LOOKUP
+    // Never let the LLM invent whether a booking exists.
+    // =========================================================
+    if (workspace?.id && params.sessionId) {
+      const normalizedMessage = message.trim();
+      const lowerMessage = normalizedMessage.toLowerCase();
+
+      const bookingLookupIntent =
+        /(عندي\s*(حجز|موعد)|حجز\s*قبل\s*كده|موعد\s*قبل\s*كده|حجوزاتي|مواعيدي|existing\s*(booking|appointment)|my\s*(booking|appointment))/i.test(
+          lowerMessage
+        );
+
+      const digitsOnly = normalizedMessage.replace(/\D/g, "");
+
+      const looksLikePhone =
+        digitsOnly.length >= 10 &&
+        digitsOnly.length <= 15;
+
+      const existingContext =
+        await sharedMemoryService.getContext(
+          workspace.id,
+          params.sessionId
+        );
+
+      const recentUserMessages =
+        existingContext.messages
+          .filter((m) => m.sender === "user")
+          .slice(-4)
+          .map((m) => m.text);
+
+      const lastAssistantMessage =
+        existingContext.messages
+          .slice()
+          .reverse()
+          .find((m) => m.sender === "bot")
+          ?.text || "";
+
+      const previousAskedForBookingLookup =
+        /(رقم الموبايل المستخدم في الحجز|أراجع حجوزاتك|check your appointments|phone number used for the booking)/i.test(
+          lastAssistantMessage
+        );
+
+      // Step 1: Customer asks whether a booking exists.
+      if (bookingLookupIntent && !looksLikePhone) {
+        await sharedMemoryService.appendMessage(
+          workspace.id,
+          params.sessionId,
+          {
+            sender: "user",
+            text: message,
+            time: new Date().toISOString(),
+            agentRole: "Sales"
+          }
+        );
+
+        const lookupPrompt =
+          messageLang === "ar"
+            ? "أكيد. ابعتلي رقم الموبايل المستخدم في الحجز علشان أراجع حجوزاتك المسجلة في النظام."
+            : "Sure. Please send the phone number used for the booking so I can check your appointments.";
+
+        await sharedMemoryService.appendMessage(
+          workspace.id,
+          params.sessionId,
+          {
+            sender: "bot",
+            text: lookupPrompt,
+            time: new Date().toISOString(),
+            agentRole: "Sales"
+          }
+        );
+
+        console.log(
+          `📞 [FOX CRM] Waiting for customer phone | Workspace=${workspace.id}`
+        );
+
+        return {
+          response: lookupPrompt,
+          aiResponse: lookupPrompt,
+          detectedLanguage: messageLang,
+          source: "fox_crm_lookup",
+          suggestedActions: []
+        };
+      }
+
+      // Step 2: Next customer message contains phone number.
+      if (looksLikePhone && previousAskedForBookingLookup) {
+        await sharedMemoryService.appendMessage(
+          workspace.id,
+          params.sessionId,
+          {
+            sender: "user",
+            text: message,
+            time: new Date().toISOString(),
+            agentRole: "Sales"
+          }
+        );
+
+        const appointments =
+          await workspaceDataService.getCustomerAppointments(
+            workspace.id,
+            normalizedMessage
+          );
+
+        console.log(
+          `🔎 [FOX CRM] Customer appointments lookup | Workspace=${workspace.id} | Phone=${normalizedMessage} | Count=${appointments.length}`
+        );
+
+        let replyText = "";
+
+        if (appointments.length === 0) {
+          replyText =
+            messageLang === "ar"
+              ? "راجعت النظام ولم أجد حجوزات حالية أو قادمة مسجلة على رقم الموبايل ده."
+              : "I checked the system and found no current or upcoming appointments registered with this phone number.";
+        } else {
+          const appointmentLines =
+            appointments.map((apt: any, index: number) =>
+              messageLang === "ar"
+                ? `${index + 1}) يوم ${apt.date} الساعة ${apt.time} — الحالة: ${apt.status || "Scheduled"}`
+                : `${index + 1}) ${apt.date} at ${apt.time} — Status: ${apt.status || "Scheduled"}`
+            );
+
+          replyText =
+            messageLang === "ar"
+              ? `لقيت ${appointments.length} حجز حالي/قادم على الرقم ده:\n\n${appointmentLines.join("\n")}`
+              : `I found ${appointments.length} current/upcoming appointment(s):\n\n${appointmentLines.join("\n")}`;
+        }
+
+        await sharedMemoryService.appendMessage(
+          workspace.id,
+          params.sessionId,
+          {
+            sender: "bot",
+            text: replyText,
+            time: new Date().toISOString(),
+            agentRole: "Sales"
+          }
+        );
+
+        return {
+          response: replyText,
+          aiResponse: replyText,
+          detectedLanguage: messageLang,
+          source: "firestore:appointments",
+          suggestedActions:
+            messageLang === "ar"
+              ? ["حجز موعد جديد", "تعديل موعد"]
+              : ["Book New Appointment", "Modify Appointment"]
+        };
+      }
+    }
+
+    // =========================================================
+    // DETERMINISTIC NEW BOOKING IDENTITY GUARD
+    // A new booking must use fresh/reconfirmed customer identity.
+    // =========================================================
+    if (workspace?.id && params.sessionId) {
+      const newBookingIntent =
+        /(عاوز\s*أحجز|عايز\s*أحجز|أريد\s*حجز|اريد\s*حجز|احجز|أحجز|book\s+an?\s*appointment|book\s+appointment|reserve)/i.test(
+          message
+        );
+
+      const currentDigits =
+        String(message || "").replace(/\D/g, "");
+
+      const hasCurrentPhone =
+        currentDigits.length >= 10 &&
+        currentDigits.length <= 15;
+
+      // We deliberately require the customer to provide/reconfirm
+      // identity in the CURRENT booking conversation.
+      if (newBookingIntent && !hasCurrentPhone) {
+        await sharedMemoryService.appendMessage(
+          workspace.id,
+          params.sessionId,
+          {
+            sender: "user",
+            text: message,
+            time: new Date().toISOString(),
+            agentRole: "Sales"
+          }
+        );
+
+        const bookingDetailsPrompt =
+          messageLang === "ar"
+            ? "تمام ✅ قبل تأكيد الحجز، ابعتلي **اسم صاحب الحجز ورقم الموبايل** المستخدم في الحجز."
+            : "Great ✅ Before confirming the booking, please send the **customer name and phone number** for this booking.";
+
+        await sharedMemoryService.appendMessage(
+          workspace.id,
+          params.sessionId,
+          {
+            sender: "bot",
+            text: bookingDetailsPrompt,
+            time: new Date().toISOString(),
+            agentRole: "Sales"
+          }
+        );
+
+        console.log(
+          `📝 [FOX Booking] Waiting for fresh customer identity | Workspace=${workspace.id}`
+        );
+
+        return {
+          response: bookingDetailsPrompt,
+          aiResponse: bookingDetailsPrompt,
+          detectedLanguage: messageLang,
+          source: "fox_booking_guard",
+          suggestedActions: []
+        };
+      }
+    }
+
+    // =========================================================
+    // DETERMINISTIC BOOKING FOLLOW-UP
+    // If FOX previously asked for fresh name + phone, complete
+    // the booking server-side instead of depending on LLM tools.
+    // =========================================================
+    if (workspace?.id && params.sessionId) {
+      try {
+        const bookingCtx =
+          await sharedMemoryService.getContext(
+            workspace.id,
+            params.sessionId
+          );
+
+        const lastBotText =
+          bookingCtx.messages
+            .slice()
+            .reverse()
+            .find((m) => m.sender === "bot")
+            ?.text || "";
+
+        const waitingForIdentity =
+          /(اسم صاحب الحجز ورقم الموبايل|customer name and phone number)/i.test(
+            lastBotText
+          );
+
+        if (waitingForIdentity) {
+          const lines = String(message || "")
+            .split(/\n+/)
+            .map((x) => x.trim())
+            .filter(Boolean);
+
+          const phoneLine =
+            lines.find((line) => {
+              const digits = line.replace(/\D/g, "");
+              return digits.length >= 10 && digits.length <= 15;
+            }) || "";
+
+          const phone =
+            phoneLine.replace(/\D/g, "");
+
+          const customerName =
+            lines
+              .filter((line) => line !== phoneLine)
+              .join(" ")
+              .trim();
+
+          const originalBookingRequest =
+            bookingCtx.messages
+              .slice()
+              .reverse()
+              .find(
+                (m) =>
+                  m.sender === "user" &&
+                  /(عاوز\s*أحجز|عايز\s*أحجز|أريد\s*حجز|اريد\s*حجز|احجز|أحجز|book\s+an?\s*appointment|reserve)/i.test(
+                    m.text || ""
+                  )
+              )
+              ?.text || "";
+
+          if (
+            phone.length >= 10 &&
+            customerName.length >= 2 &&
+            originalBookingRequest
+          ) {
+            // -------------------------------
+            // Parse Arabic / English date
+            // -------------------------------
+            const arabicMonths: Record<string, number> = {
+              "يناير": 1,
+              "فبراير": 2,
+              "مارس": 3,
+              "أبريل": 4,
+              "ابريل": 4,
+              "مايو": 5,
+              "يونيو": 6,
+              "يوليو": 7,
+              "أغسطس": 8,
+              "اغسطس": 8,
+              "سبتمبر": 9,
+              "أكتوبر": 10,
+              "اكتوبر": 10,
+              "نوفمبر": 11,
+              "ديسمبر": 12
+            };
+
+            let bookingDate = "";
+            let bookingTime = "";
+
+            const now = new Date();
+            const currentYear = now.getFullYear();
+
+            // Arabic date: 22 أغسطس
+            const dateMatch =
+              originalBookingRequest.match(
+                /(\d{1,2})\s+(يناير|فبراير|مارس|أبريل|ابريل|مايو|يونيو|يوليو|أغسطس|اغسطس|سبتمبر|أكتوبر|اكتوبر|نوفمبر|ديسمبر)/i
+              );
+
+            if (dateMatch) {
+              const day = Number(dateMatch[1]);
+              const month =
+                arabicMonths[dateMatch[2]];
+
+              if (month) {
+                bookingDate =
+                  `${currentYear}-` +
+                  `${String(month).padStart(2, "0")}-` +
+                  `${String(day).padStart(2, "0")}`;
+              }
+            }
+
+            // ------------------------------------------------
+            // Parse appointment TIME only from an explicit time phrase.
+            // Never mistake the DAY number (e.g. 23 August) for the hour.
+            // Examples:
+            // الساعة 1 ظهراً  -> 01:00 PM
+            // الساعة 10 صباحاً -> 10:00 AM
+            // 2:30 مساءً       -> 02:30 PM
+            // ------------------------------------------------
+            const timeMatch =
+              originalBookingRequest.match(
+                /(?:الساعة\s+|الساعة\s*|at\s+)(\d{1,2})(?::(\d{2}))?\s*(صباحاً|صباحا|صباحًا|صباح|ظهراً|ظهرا|ظهرًا|ظهر|مساءً|مساءا|مساء|am|pm)/i
+              );
+
+            if (timeMatch) {
+              let hour12 = Number(timeMatch[1]);
+              const minute = Number(timeMatch[2] || 0);
+
+              const period =
+                String(timeMatch[3] || "").toLowerCase();
+
+              if (
+                hour12 < 1 ||
+                hour12 > 12 ||
+                minute < 0 ||
+                minute > 59
+              ) {
+                bookingTime = "";
+              } else {
+                const isPM =
+                  /ظهر|مساء|pm/.test(period);
+
+                const suffix = isPM ? "PM" : "AM";
+
+                bookingTime =
+                  `${String(hour12).padStart(2, "0")}:` +
+                  `${String(minute).padStart(2, "0")} ${suffix}`;
+              }
+            }
+
+            if (!bookingDate || !bookingTime) {
+              const msg =
+                messageLang === "ar"
+                  ? "محتاج أتأكد من تاريخ ووقت الحجز. اكتبهم مرة تانية مثلاً: 22 أغسطس الساعة 12 ظهراً."
+                  : "I need to confirm the appointment date and time. Please send them again.";
+
+              return {
+                response: msg,
+                aiResponse: msg,
+                detectedLanguage: messageLang,
+                source: "fox_booking_parser",
+                suggestedActions: []
+              };
+            }
+
+            const available =
+              await workspaceDataService.isAppointmentAvailable(
+                workspace.id,
+                bookingDate,
+                bookingTime
+              );
+
+            if (!available) {
+              const msg =
+                messageLang === "ar"
+                  ? `الموعد ${bookingDate} الساعة ${bookingTime} غير متاح حالياً. اختار وقت تاني من فضلك.`
+                  : `The appointment on ${bookingDate} at ${bookingTime} is not available. Please choose another time.`;
+
+              return {
+                response: msg,
+                aiResponse: msg,
+                detectedLanguage: messageLang,
+                source: "firestore:availability",
+                suggestedActions: []
+              };
+            }
+
+            const lead =
+              await workspaceDataService.upsertLead(
+                workspace.id,
+                {
+                  name: customerName,
+                  phone,
+                  channel,
+                  sessionId: params.sessionId
+                }
+              );
+
+            const appointment =
+              await workspaceDataService.createAppointment(
+                workspace.id,
+                {
+                  customerName,
+                  phone,
+                  date: bookingDate,
+                  time: bookingTime,
+                  channel,
+                  sessionId: params.sessionId
+                }
+              );
+
+            console.log(
+              `✅ [FOX CRM] Direct appointment saved | Workspace=${workspace.id} | Customer=${customerName} | ${bookingDate} ${bookingTime}`
+            );
+
+            if (
+              workspace.externalCrmWebhookUrl
+            ) {
+              try {
+                triggerExternalCRM(
+                  workspace.id,
+                  "booking",
+                  {
+                    appointment,
+                    lead,
+                    date: bookingDate,
+                    time: bookingTime,
+                    name: customerName,
+                    phone,
+                    channel
+                  },
+                  workspace.externalCrmWebhookUrl
+                );
+              } catch (err) {
+                console.warn(
+                  "[FOX CRM] External webhook failed; booking remains saved.",
+                  err
+                );
+              }
+            }
+
+            const bookingLanguage =
+              this.detectLanguage(originalBookingRequest);
+
+            const confirmation =
+              bookingLanguage === "ar"
+                ? `✅ تم تأكيد حجزك بنجاح 🎉\n\nالاسم: ${customerName}\nالتاريخ: ${bookingDate}\nالوقت: ${bookingTime}\n\nنتشرف بخدمتك في ${workspace.name || "العيادة"}.`
+                : `✅ Your appointment has been confirmed successfully.\n\nName: ${customerName}\nDate: ${bookingDate}\nTime: ${bookingTime}`;
+
+            await sharedMemoryService.appendMessage(
+              workspace.id,
+              params.sessionId,
+              {
+                sender: "user",
+                text: message,
+                time: new Date().toISOString(),
+                agentRole: "Sales"
+              }
+            );
+
+            await sharedMemoryService.appendMessage(
+              workspace.id,
+              params.sessionId,
+              {
+                sender: "bot",
+                text: confirmation,
+                time: new Date().toISOString(),
+                agentRole: "Sales"
+              }
+            );
+
+            return {
+              response: confirmation,
+              aiResponse: confirmation,
+              detectedLanguage: this.detectLanguage(originalBookingRequest),
+              source: "firestore:direct_booking",
+              suggestedActions:
+                messageLang === "ar"
+                  ? ["عرض حجوزاتي", "تعديل الموعد", "إلغاء الموعد"]
+                  : ["My Appointments", "Modify Appointment", "Cancel Appointment"]
+            };
+          }
+        }
+      } catch (bookingError) {
+        console.error(
+          "❌ [FOX Direct Booking Error]",
+          bookingError
+        );
+      }
+    }
 
     // FOX Smart Agent Router
-    const agentRole = await this.detectAgentRole(workspace, message);
+    let forcedBookingSales = false;
+
+    if (workspace?.id && params.sessionId) {
+      try {
+        const bookingCtx =
+          await sharedMemoryService.getContext(
+            workspace.id,
+            params.sessionId
+          );
+
+        const lastBotText =
+          bookingCtx.messages
+            .slice()
+            .reverse()
+            .find((m) => m.sender === "bot")
+            ?.text || "";
+
+        forcedBookingSales =
+          /(اسم صاحب الحجز ورقم الموبايل|customer name and phone number)/i.test(
+            lastBotText
+          );
+      } catch {
+        forcedBookingSales = false;
+      }
+    }
+
+    const agentRole: "Sales" | "Support" | "Marketing" =
+      forcedBookingSales
+        ? "Sales"
+        : await this.detectAgentRole(workspace, message);
 
     const roleConfig: Partial<AiAgentConfig> =
       agentRole === "Sales"
@@ -536,16 +1167,34 @@ ${industryContext || "Standard business inquiry catalog."}
       `[Smart Router] ${channel} -> ${agentRole}: ${message.substring(0, 120)}`
     );
 
-    const systemInstruction = this.buildSystemInstruction(
-      workspace,
-      messageLang,
-      channel,
-      effectiveConfig
-    );
+    const todayISO = new Date().toISOString().slice(0, 10);
 
+    const systemInstruction =
+      this.buildSystemInstruction(
+        workspace,
+        messageLang,
+        channel,
+        effectiveConfig
+      ) +
+      `
+
+CURRENT DATE:
+${todayISO}
+
+DATE SAFETY RULES:
+- Never create or confirm an appointment in the past.
+- If the customer says "tomorrow", "بكرة", "next week", or another relative date, resolve it using CURRENT DATE above.
+- Never guess a previous year from conversation history.
+- Never reuse an old customer's name or phone for a new booking unless the customer provided or clearly reconfirmed them in the current booking conversation.
+- Asking about available appointments is NOT permission to create a booking.
+`;
+
+    const openRouter = this.getOpenRouterClient();
     const ai = this.getGeminiClient();
 
-    if (!ai) {
+    // OpenRouter is the primary provider.
+    // Gemini remains available as a fallback.
+    if (!openRouter && !ai) {
       const msgLower = message.toLowerCase();
       const isAr = messageLang === "ar";
       const businessName = workspace.name || "Fox Business";
@@ -633,52 +1282,966 @@ ${industryContext || "Standard business inquiry catalog."}
         "gemini-flash-latest"
       ];
 
-      const tools = [];
-      if (workspace.googleSheetsAccessToken && workspace.crmSpreadsheetId) {
-        tools.push({
+      // =========================================================
+      // FOX NATIVE CRM TOOLS
+      // Firestore is the primary database.
+      // Google Sheets / external CRM are optional integrations.
+      // =========================================================
+      const tools = [
+        {
           functionDeclarations: [
             {
               name: "checkAppointmentAvailability",
-              description: "Check if a specific date and time is available for an appointment.",
+              description:
+                "Check whether a requested appointment date and time is available in this business workspace.",
               parameters: {
                 type: Type.OBJECT,
                 properties: {
-                  date: { type: Type.STRING, description: "The date of the appointment (e.g. 2026-07-30)" },
-                  time: { type: Type.STRING, description: "The time of the appointment (e.g. 10:00 AM)" }
+                  date: {
+                    type: Type.STRING,
+                    description: "Appointment date in YYYY-MM-DD format"
+                  },
+                  time: {
+                    type: Type.STRING,
+                    description: "Appointment time, for example 10:00 AM"
+                  }
                 },
                 required: ["date", "time"]
               }
             },
             {
               name: "bookAppointment",
-              description: "Book an appointment for a customer.",
+              description:
+                "Create and confirm an appointment only after customer name, phone, date and time have all been collected.",
               parameters: {
                 type: Type.OBJECT,
                 properties: {
-                  date: { type: Type.STRING, description: "The date of the appointment (e.g. 2026-07-30)" },
-                  time: { type: Type.STRING, description: "The time of the appointment (e.g. 10:00 AM)" },
-                  name: { type: Type.STRING, description: "The name of the customer" },
-                  phone: { type: Type.STRING, description: "The phone number of the customer" }
+                  date: {
+                    type: Type.STRING,
+                    description: "Appointment date in YYYY-MM-DD format"
+                  },
+                  time: {
+                    type: Type.STRING,
+                    description: "Appointment time"
+                  },
+                  name: {
+                    type: Type.STRING,
+                    description: "Customer full name"
+                  },
+                  phone: {
+                    type: Type.STRING,
+                    description: "Customer phone number"
+                  }
                 },
                 required: ["date", "time", "name", "phone"]
               }
             },
             {
               name: "recordSale",
-              description: "Record a successful sale or order.",
+              description:
+                "Record a confirmed successful sale or order.",
               parameters: {
                 type: Type.OBJECT,
                 properties: {
-                  itemName: { type: Type.STRING, description: "The name of the item or package sold" },
-                  price: { type: Type.NUMBER, description: "The total price" },
-                  customerName: { type: Type.STRING, description: "The name of the customer" },
-                  customerPhone: { type: Type.STRING, description: "The phone number of the customer" }
+                  itemName: {
+                    type: Type.STRING,
+                    description: "Item, service or package sold"
+                  },
+                  price: {
+                    type: Type.NUMBER,
+                    description: "Total sale price"
+                  },
+                  customerName: {
+                    type: Type.STRING,
+                    description: "Customer name"
+                  },
+                  customerPhone: {
+                    type: Type.STRING,
+                    description: "Customer phone"
+                  }
                 },
-                required: ["itemName", "price", "customerName", "customerPhone"]
+                required: [
+                  "itemName",
+                  "price",
+                  "customerName",
+                  "customerPhone"
+                ]
               }
             }
           ]
-        });
+        }
+      ];
+
+      // =========================================================
+      // OPENROUTER PRIMARY AI ENGINE
+      // Gemini below remains the fallback provider.
+      // =========================================================
+
+      if (openRouter) {
+        try {
+          console.log(
+            `🟢 [OpenRouter] Primary AI request | Workspace=${workspace.id || "unknown"} | Agent=${agentRole}`
+          );
+
+          const openRouterMessages: any[] = [
+            {
+              role: "system",
+              content: systemInstruction
+            }
+          ];
+
+          for (const h of finalChatHistory) {
+            const text = h.text || h.parts?.[0]?.text;
+
+            if (!text) continue;
+
+            openRouterMessages.push({
+              role:
+                h.sender === "user" || h.role === "user"
+                  ? "user"
+                  : "assistant",
+              content: text
+            });
+          }
+
+          openRouterMessages.push({
+            role: "user",
+            content: message
+          });
+
+          const openRouterTools: any[] = [
+            {
+              type: "function",
+              function: {
+                name: "checkAppointmentAvailability",
+                description:
+                  "Check whether a requested appointment date and time is available in this business workspace.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    date: {
+                      type: "string",
+                      description: "Appointment date in YYYY-MM-DD format"
+                    },
+                    time: {
+                      type: "string",
+                      description: "Appointment time, for example 10:00 AM"
+                    }
+                  },
+                  required: ["date", "time"]
+                }
+              }
+            },
+            {
+              type: "function",
+              function: {
+                name: "bookAppointment",
+                description:
+                  "Create and confirm an appointment only after customer name, phone, date and time have all been collected.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    date: {
+                      type: "string",
+                      description: "Appointment date in YYYY-MM-DD format"
+                    },
+                    time: {
+                      type: "string",
+                      description: "Appointment time"
+                    },
+                    name: {
+                      type: "string",
+                      description: "Customer full name"
+                    },
+                    phone: {
+                      type: "string",
+                      description: "Customer phone number"
+                    }
+                  },
+                  required: ["date", "time", "name", "phone"]
+                }
+              }
+            },
+            {
+              type: "function",
+              function: {
+                name: "getCustomerAppointments",
+                description:
+                  "Read the customer's real current/future appointments from FOX CRM. Use this before claiming that a customer already has a booking.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    phone: {
+                      type: "string",
+                      description: "Customer phone number"
+                    }
+                  },
+                  required: ["phone"]
+                }
+              }
+            },
+            {
+              type: "function",
+              function: {
+                name: "getAppointmentsForDate",
+                description:
+                  "Read the appointments already booked for a specific date from FOX CRM. This returns booked appointments, not invented availability.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    date: {
+                      type: "string",
+                      description: "Date in YYYY-MM-DD format"
+                    }
+                  },
+                  required: ["date"]
+                }
+              }
+            },
+            {
+              type: "function",
+              function: {
+                name: "recordSale",
+                description:
+                  "Record a confirmed successful sale or order.",
+                parameters: {
+                  type: "object",
+                  properties: {
+                    itemName: {
+                      type: "string",
+                      description: "Item, service or package sold"
+                    },
+                    price: {
+                      type: "number",
+                      description: "Total sale price"
+                    },
+                    customerName: {
+                      type: "string",
+                      description: "Customer name"
+                    },
+                    customerPhone: {
+                      type: "string",
+                      description: "Customer phone"
+                    }
+                  },
+                  required: [
+                    "itemName",
+                    "price",
+                    "customerName",
+                    "customerPhone"
+                  ]
+                }
+              }
+            }
+          ];
+
+          let orCompletion: any = null;
+          let finalOpenRouterText = "";
+
+          // Allow several tool turns:
+          // availability -> collect info -> booking -> final confirmation.
+          for (let toolRound = 0; toolRound < 5; toolRound++) {
+            orCompletion = await openRouter.chat.completions.create({
+              model: process.env.OPENROUTER_MODEL || "openrouter/free",
+              messages: openRouterMessages,
+              tools: openRouterTools,
+              tool_choice: "auto",
+              temperature: 0.3
+            });
+
+            const orMessage: any =
+              orCompletion.choices?.[0]?.message;
+
+            if (!orMessage) {
+              throw new Error(
+                "OpenRouter returned no assistant message"
+              );
+            }
+
+            const toolCalls: any[] =
+              orMessage.tool_calls || [];
+
+            // No tool call = final normal AI answer.
+            if (toolCalls.length === 0) {
+              finalOpenRouterText =
+                typeof orMessage.content === "string"
+                  ? orMessage.content
+                  : "";
+
+              break;
+            }
+
+            // Preserve the assistant tool-call message.
+            openRouterMessages.push(orMessage);
+
+            for (const toolCall of toolCalls) {
+              const toolName =
+                toolCall?.function?.name;
+
+              let args: any = {};
+
+              try {
+                args = JSON.parse(
+                  toolCall?.function?.arguments || "{}"
+                );
+              } catch {
+                args = {};
+              }
+
+              console.log(
+                `🔧 [OpenRouter Tool] ${toolName} | Workspace=${workspace.id || "unknown"}`
+              );
+
+              let functionResult: any = {};
+
+              try {
+                if (
+                  toolName ===
+                  "checkAppointmentAvailability"
+                ) {
+                  const { date, time } = args;
+
+                  const isAvailable =
+                    await workspaceDataService.isAppointmentAvailable(
+                      workspace.id,
+                      date,
+                      time
+                    );
+
+                  functionResult = {
+                    available: isAvailable,
+                    date,
+                    time,
+                    message: isAvailable
+                      ? "Slot is available."
+                      : "Slot is already booked. Please suggest another time."
+                  };
+
+                  // =====================================================
+                  // DETERMINISTIC BOOKING COMPLETION
+                  // Some OpenRouter free models stop after availability
+                  // instead of calling bookAppointment. If this is the
+                  // fresh identity follow-up of an explicit booking flow,
+                  // complete the booking server-side.
+                  // =====================================================
+                  if (isAvailable && params.sessionId && workspace.id) {
+                    const currentLines = String(message || "")
+                      .split(/\n+/)
+                      .map((x) => x.trim())
+                      .filter(Boolean);
+
+                    const phoneLine =
+                      currentLines.find((line) => {
+                        const digits = line.replace(/\D/g, "");
+                        return digits.length >= 10 && digits.length <= 15;
+                      }) || "";
+
+                    const freshPhone =
+                      phoneLine.replace(/\D/g, "");
+
+                    const freshName =
+                      currentLines
+                        .filter((line) => line !== phoneLine)
+                        .join(" ")
+                        .trim();
+
+                    const bookingCtx =
+                      await sharedMemoryService.getContext(
+                        workspace.id,
+                        params.sessionId
+                      );
+
+                    const lastBotText =
+                      bookingCtx.messages
+                        .slice()
+                        .reverse()
+                        .find((m) => m.sender === "bot")
+                        ?.text || "";
+
+                    const wasWaitingForFreshIdentity =
+                      /(اسم صاحب الحجز ورقم الموبايل|customer name and phone number)/i.test(
+                        lastBotText
+                      );
+
+                    const previousUserBookingRequest =
+                      bookingCtx.messages
+                        .slice()
+                        .reverse()
+                        .find(
+                          (m) =>
+                            m.sender === "user" &&
+                            /(عاوز\s*أحجز|عايز\s*أحجز|أريد\s*حجز|اريد\s*حجز|احجز|أحجز|book\s+an?\s*appointment|reserve)/i.test(
+                              m.text || ""
+                            )
+                        );
+
+                    if (
+                      wasWaitingForFreshIdentity &&
+                      previousUserBookingRequest &&
+                      freshName.length >= 2 &&
+                      freshPhone.length >= 10
+                    ) {
+                      // Re-check immediately before the write.
+                      const stillAvailable =
+                        await workspaceDataService.isAppointmentAvailable(
+                          workspace.id,
+                          date,
+                          time
+                        );
+
+                      if (stillAvailable) {
+                        const lead =
+                          await workspaceDataService.upsertLead(
+                            workspace.id,
+                            {
+                              name: freshName,
+                              phone: freshPhone,
+                              channel,
+                              sessionId: params.sessionId
+                            }
+                          );
+
+                        const appointment =
+                          await workspaceDataService.createAppointment(
+                            workspace.id,
+                            {
+                              customerName: freshName,
+                              phone: freshPhone,
+                              date,
+                              time,
+                              channel,
+                              sessionId: params.sessionId
+                            }
+                          );
+
+                        if (
+                          workspace.googleSheetsAccessToken &&
+                          workspace.crmSpreadsheetId
+                        ) {
+                          try {
+                            await bookAppointmentInSheet(
+                              workspace.googleSheetsAccessToken,
+                              workspace.crmSpreadsheetId,
+                              date,
+                              time,
+                              freshName,
+                              freshPhone
+                            );
+                          } catch (sheetError) {
+                            console.warn(
+                              "[FOX CRM] Google Sheets sync failed; Firestore booking remains saved.",
+                              sheetError
+                            );
+                          }
+                        }
+
+                        if (workspace.externalCrmWebhookUrl) {
+                          try {
+                            triggerExternalCRM(
+                              workspace.id,
+                              "booking",
+                              {
+                                appointment,
+                                lead,
+                                date,
+                                time,
+                                name: freshName,
+                                phone: freshPhone,
+                                channel
+                              },
+                              workspace.externalCrmWebhookUrl
+                            );
+                          } catch (webhookError) {
+                            console.warn(
+                              "[FOX CRM] External CRM webhook failed; Firestore booking remains saved.",
+                              webhookError
+                            );
+                          }
+                        }
+
+                        console.log(
+                          `✅ [FOX CRM] Deterministic appointment saved | Workspace=${workspace.id} | Customer=${freshName} | ${date} ${time}`
+                        );
+
+                        functionResult = {
+                          success: true,
+                          available: true,
+                          bookingCreated: true,
+                          date,
+                          time,
+                          customerName: freshName
+                        };
+
+                        finalOpenRouterText =
+                          messageLang === "ar"
+                            ? `✅ تم تأكيد حجزك بنجاح.\n\nالاسم: ${freshName}\nالتاريخ: ${date}\nالوقت: ${time}\n\nنتشرف بخدمتك.`
+                            : `✅ Your appointment has been confirmed successfully.\n\nName: ${freshName}\nDate: ${date}\nTime: ${time}\n\nWe look forward to serving you.`;
+                      }
+                    }
+                  }
+
+                } else if (
+                  toolName === "bookAppointment"
+                ) {
+                  const {
+                    date,
+                    time,
+                    name,
+                    phone
+                  } = args;
+
+                  // -------------------------------------------------
+                  // TRANSACTION SAFETY GUARD
+                  // Never trust booking identity only because the LLM
+                  // remembered it from an older conversation.
+                  // -------------------------------------------------
+                  const recentUserContext = [
+                    ...finalChatHistory
+                      .filter(
+                        (h: any) =>
+                          h.sender === "user" ||
+                          h.role === "user"
+                      )
+                      .slice(-4)
+                      .map(
+                        (h: any) =>
+                          h.text ||
+                          h.parts?.[0]?.text ||
+                          ""
+                      ),
+                    message
+                  ].join("\n");
+
+                  const recentAssistantContext =
+                    finalChatHistory
+                      .filter(
+                        (h: any) =>
+                          h.sender !== "user" &&
+                          h.role !== "user"
+                      )
+                      .slice(-2)
+                      .map(
+                        (h: any) =>
+                          h.text ||
+                          h.parts?.[0]?.text ||
+                          ""
+                      )
+                      .join("\n");
+
+                  const userDigits =
+                    recentUserContext.replace(/\D/g, "");
+
+                  const phoneDigits =
+                    String(phone || "").replace(/\D/g, "");
+
+                  const normalizedName =
+                    String(name || "")
+                      .trim()
+                      .toLowerCase();
+
+                  const normalizedUserContext =
+                    recentUserContext.toLowerCase();
+
+                  const userProvidedPhone =
+                    phoneDigits.length >= 8 &&
+                    userDigits.includes(
+                      phoneDigits.slice(-8)
+                    );
+
+                  const userProvidedName =
+                    normalizedName.length >= 3 &&
+                    normalizedUserContext.includes(
+                      normalizedName
+                    );
+
+                  const explicitBookingIntent =
+                    /(عاوز\s*أحجز|عايز\s*أحجز|اريد\s*حجز|أريد\s*حجز|احجز|أحجز|book\s|book an appointment|reserve)/i.test(
+                      recentUserContext
+                    );
+
+                  const assistantRequestedDetails =
+                    /(الاسم|اسمك|رقم الهاتف|رقم الموبايل|الموبايل|phone|name).*(موعد|تاريخ|وقت|date|time)|(?:موعد|تاريخ|وقت|date|time).*(الاسم|اسمك|رقم الهاتف|رقم الموبايل|phone|name)/is.test(
+                      recentAssistantContext
+                    );
+
+                  const validDateFormat =
+                    /^\d{4}-\d{2}-\d{2}$/.test(
+                      String(date || "")
+                    );
+
+                  const todayForBooking =
+                    new Date()
+                      .toISOString()
+                      .slice(0, 10);
+
+                  const dateIsNotPast =
+                    validDateFormat &&
+                    String(date) >= todayForBooking;
+
+                  if (
+                    !date ||
+                    !time ||
+                    !name ||
+                    !phone
+                  ) {
+                    functionResult = {
+                      success: false,
+                      message:
+                        "Missing required booking information. Ask the customer for name, phone, date and time."
+                    };
+
+                  } else if (!dateIsNotPast) {
+                    functionResult = {
+                      success: false,
+                      message:
+                        `The requested appointment date (${date}) is invalid or in the past. Today is ${todayForBooking}. Ask the customer for a valid future date.`
+                    };
+
+                  } else if (
+                    !userProvidedPhone ||
+                    !userProvidedName
+                  ) {
+                    functionResult = {
+                      success: false,
+                      message:
+                        "Do NOT create the booking yet. The customer must provide or reconfirm their current name and phone number in this booking conversation. Do not reuse identity data from old memory."
+                    };
+
+                  } else if (
+                    !explicitBookingIntent &&
+                    !assistantRequestedDetails
+                  ) {
+                    functionResult = {
+                      success: false,
+                      message:
+                        "This conversation does not contain enough evidence of an active booking request. Do not create an appointment. Answer the availability question only."
+                    };
+
+                  } else {
+                    // Re-check immediately before saving.
+                    const isAvailable =
+                      await workspaceDataService.isAppointmentAvailable(
+                        workspace.id,
+                        date,
+                        time
+                      );
+
+                    if (!isAvailable) {
+                      functionResult = {
+                        success: false,
+                        message:
+                          "This appointment slot is already booked. Ask the customer to choose another time."
+                      };
+                    } else {
+                      const lead =
+                        await workspaceDataService.upsertLead(
+                          workspace.id,
+                          {
+                            name,
+                            phone,
+                            channel,
+                            sessionId:
+                              params.sessionId
+                          }
+                        );
+
+                      const appointment =
+                        await workspaceDataService.createAppointment(
+                          workspace.id,
+                          {
+                            customerName: name,
+                            phone,
+                            date,
+                            time,
+                            channel,
+                            sessionId:
+                              params.sessionId
+                          }
+                        );
+
+                      // Optional Google Sheets sync.
+                      if (
+                        workspace.googleSheetsAccessToken &&
+                        workspace.crmSpreadsheetId
+                      ) {
+                        try {
+                          await bookAppointmentInSheet(
+                            workspace.googleSheetsAccessToken,
+                            workspace.crmSpreadsheetId,
+                            date,
+                            time,
+                            name,
+                            phone
+                          );
+                        } catch (sheetError) {
+                          console.warn(
+                            "[FOX CRM] Google Sheets sync failed; Firestore booking remains saved.",
+                            sheetError
+                          );
+                        }
+                      }
+
+                      // Optional external CRM / n8n.
+                      if (
+                        workspace.externalCrmWebhookUrl
+                      ) {
+                        try {
+                          triggerExternalCRM(
+                            workspace.id,
+                            "booking",
+                            {
+                              appointment,
+                              lead,
+                              date,
+                              time,
+                              name,
+                              phone,
+                              channel
+                            },
+                            workspace.externalCrmWebhookUrl
+                          );
+                        } catch (webhookError) {
+                          console.warn(
+                            "[FOX CRM] External CRM webhook failed; Firestore booking remains saved.",
+                            webhookError
+                          );
+                        }
+                      }
+
+                      console.log(
+                        `✅ [FOX CRM] Appointment saved | Workspace=${workspace.id} | Customer=${name} | ${date} ${time}`
+                      );
+
+                      functionResult = {
+                        success: true,
+                        appointmentId: appointment.id,
+                        leadId: lead.id,
+                        date,
+                        time,
+                        customerName: name,
+                        phone,
+                        message:
+                          "Appointment booked successfully."
+                      };
+
+                      // Customer-facing confirmation is deterministic.
+                      // Do not expose internal CRM IDs.
+                      finalOpenRouterText =
+                        messageLang === "ar"
+                          ? `✅ تم تأكيد حجزك بنجاح.\n\nالاسم: ${name}\nالتاريخ: ${date}\nالوقت: ${time}\n\nنتشرف بخدمتك.`
+                          : `✅ Your appointment has been confirmed successfully.\n\nName: ${name}\nDate: ${date}\nTime: ${time}\n\nWe look forward to serving you.`;
+                    }
+                  }
+
+                } else if (
+                  toolName === "getCustomerAppointments"
+                ) {
+                  const { phone } = args;
+
+                  if (!phone) {
+                    functionResult = {
+                      success: false,
+                      message:
+                        "Customer phone number is required before checking existing appointments."
+                    };
+                  } else {
+                    const appointments =
+                      await workspaceDataService.getCustomerAppointments(
+                        workspace.id,
+                        phone
+                      );
+
+                    console.log(
+                      `🔎 [FOX CRM] Customer appointments lookup | Workspace=${workspace.id} | Count=${appointments.length}`
+                    );
+
+                    functionResult = {
+                      success: true,
+                      count: appointments.length,
+                      appointments: appointments.map((apt: any) => ({
+                        date: apt.date,
+                        time: apt.time,
+                        status: apt.status
+                      }))
+                    };
+                  }
+
+                } else if (
+                  toolName === "getAppointmentsForDate"
+                ) {
+                  const { date } = args;
+
+                  if (!date) {
+                    functionResult = {
+                      success: false,
+                      message: "Date is required."
+                    };
+                  } else {
+                    const appointments =
+                      await workspaceDataService.getAppointmentsForDate(
+                        workspace.id,
+                        date
+                      );
+
+                    console.log(
+                      `📅 [FOX CRM] Date appointments lookup | Workspace=${workspace.id} | Date=${date} | Count=${appointments.length}`
+                    );
+
+                    functionResult = {
+                      success: true,
+                      date,
+                      bookedSlots: appointments.map((apt: any) => ({
+                        time: apt.time,
+                        status: apt.status
+                      }))
+                    };
+                  }
+
+                } else if (
+                  toolName === "recordSale"
+                ) {
+                  const {
+                    itemName,
+                    price,
+                    customerName,
+                    customerPhone
+                  } = args;
+
+                  if (
+                    workspace.externalCrmWebhookUrl
+                  ) {
+                    triggerExternalCRM(
+                      workspace.id,
+                      "sale",
+                      {
+                        itemName,
+                        price,
+                        customerName,
+                        customerPhone
+                      },
+                      workspace.externalCrmWebhookUrl
+                    );
+                  }
+
+                  functionResult = {
+                    success: true,
+                    message:
+                      "Sale recorded successfully."
+                  };
+
+                } else {
+                  functionResult = {
+                    success: false,
+                    error:
+                      `Unknown FOX tool: ${toolName}`
+                  };
+                }
+
+              } catch (toolError: any) {
+                console.error(
+                  `❌ [OpenRouter Tool Error] ${toolName}:`,
+                  toolError
+                );
+
+                functionResult = {
+                  success: false,
+                  error:
+                    toolError?.message ||
+                    "Tool execution failed"
+                };
+              }
+
+              openRouterMessages.push({
+                role: "tool",
+                tool_call_id: toolCall.id,
+                content: JSON.stringify(functionResult)
+              });
+
+              if (
+                finalOpenRouterText &&
+                (
+                  (toolName === "bookAppointment" &&
+                    functionResult?.success === true) ||
+                  functionResult?.bookingCreated === true
+                )
+              ) {
+                break;
+              }
+            }
+
+            if (finalOpenRouterText) {
+              break;
+            }
+          }
+
+          if (!finalOpenRouterText) {
+            throw new Error(
+              "OpenRouter tool loop ended without a final text response"
+            );
+          }
+
+          console.log(
+            `✅ [OpenRouter] Response completed | Model=${orCompletion?.model || "openrouter/free"}`
+          );
+
+          // Save bot reply in this tenant's shared memory.
+          if (
+            params.sessionId &&
+            workspace.id
+          ) {
+            await sharedMemoryService.appendMessage(
+              workspace.id,
+              params.sessionId,
+              {
+                sender: "bot",
+                text: finalOpenRouterText,
+                time: new Date().toISOString(),
+                agentRole
+              }
+            );
+          }
+
+          return {
+            response: finalOpenRouterText,
+            aiResponse: finalOpenRouterText,
+            detectedLanguage: messageLang,
+            source:
+              `openrouter:${orCompletion?.model || process.env.OPENROUTER_MODEL || "openrouter/free"}`,
+            suggestedActions:
+              messageLang === "ar"
+                ? [
+                    "حجز موعد",
+                    "التأكد من المواعيد المتاحة",
+                    "التحدث مع موظف"
+                  ]
+                : [
+                    "Book Appointment",
+                    "Check Availability",
+                    "Speak to Human Agent"
+                  ]
+          };
+
+        } catch (openRouterError: any) {
+          console.warn(
+            `🟠 [OpenRouter] Primary provider failed: ${openRouterError?.message || openRouterError}`
+          );
+
+          if (ai) {
+            console.log(
+              "🔵 [Gemini] Switching to fallback provider..."
+            );
+          }
+        }
+      }
+
+      // =========================================================
+      // GEMINI FALLBACK ENGINE
+      // =========================================================
+
+      if (!ai) {
+        throw new Error(
+          "OpenRouter failed and Gemini fallback is unavailable"
+        );
       }
 
       let response;
@@ -693,7 +2256,7 @@ ${industryContext || "Standard business inquiry catalog."}
             config: {
               systemInstruction,
               temperature: 0.3,
-              tools: tools.length > 0 ? tools : undefined
+              tools: undefined
             },
           });
           
@@ -703,19 +2266,125 @@ ${industryContext || "Standard business inquiry catalog."}
             try {
               if (call.name === "checkAppointmentAvailability") {
                 const { date, time } = call.args as any;
-                const isAvailable = await checkAvailability(workspace.googleSheetsAccessToken!, workspace.crmSpreadsheetId!, date, time);
-                functionResult = { available: isAvailable, message: isAvailable ? "Slot is available." : "Slot is already booked. Please suggest another time." };
+
+                // Firestore is the primary source of truth.
+                const isAvailable =
+                  await workspaceDataService.isAppointmentAvailable(
+                    workspace.id,
+                    date,
+                    time
+                  );
+
+                functionResult = {
+                  available: isAvailable,
+                  message: isAvailable
+                    ? "Slot is available."
+                    : "Slot is already booked. Please suggest another time."
+                };
+
               } else if (call.name === "bookAppointment") {
                 const { date, time, name, phone } = call.args as any;
-                // First check availability again to be safe
-                const isAvailable = await checkAvailability(workspace.googleSheetsAccessToken!, workspace.crmSpreadsheetId!, date, time);
+
+                // Always re-check immediately before booking.
+                const isAvailable =
+                  await workspaceDataService.isAppointmentAvailable(
+                    workspace.id,
+                    date,
+                    time
+                  );
+
                 if (!isAvailable) {
-                   functionResult = { success: false, message: "Sorry, this slot was just taken." };
+                  functionResult = {
+                    success: false,
+                    message:
+                      "Sorry, this appointment slot is already booked. Please select another time."
+                  };
                 } else {
-                   await bookAppointmentInSheet(workspace.googleSheetsAccessToken!, workspace.crmSpreadsheetId!, date, time, name, phone);
-                   triggerExternalCRM(workspace.id, "booking", { date, time, name, phone }, workspace.externalCrmWebhookUrl);
-                   functionResult = { success: true, message: "Appointment booked successfully in CRM." };
+                  // Create/update CRM lead for this tenant.
+                  const lead = await workspaceDataService.upsertLead(
+                    workspace.id,
+                    {
+                      name,
+                      phone,
+                      channel,
+                      sessionId: params.sessionId
+                    }
+                  );
+
+                  // Save appointment in tenant Firestore + legacy dashboard collection.
+                  const appointment =
+                    await workspaceDataService.createAppointment(
+                      workspace.id,
+                      {
+                        customerName: name,
+                        phone,
+                        date,
+                        time,
+                        channel,
+                        sessionId: params.sessionId
+                      }
+                    );
+
+                  // Optional Google Sheets synchronization.
+                  if (
+                    workspace.googleSheetsAccessToken &&
+                    workspace.crmSpreadsheetId
+                  ) {
+                    try {
+                      await bookAppointmentInSheet(
+                        workspace.googleSheetsAccessToken,
+                        workspace.crmSpreadsheetId,
+                        date,
+                        time,
+                        name,
+                        phone
+                      );
+                    } catch (sheetError) {
+                      console.warn(
+                        "[FOX CRM] Google Sheets sync failed; Firestore booking remains saved.",
+                        sheetError
+                      );
+                    }
+                  }
+
+                  // Optional external CRM / n8n webhook.
+                  if (workspace.externalCrmWebhookUrl) {
+                    try {
+                      triggerExternalCRM(
+                        workspace.id,
+                        "booking",
+                        {
+                          appointment,
+                          lead,
+                          date,
+                          time,
+                          name,
+                          phone,
+                          channel
+                        },
+                        workspace.externalCrmWebhookUrl
+                      );
+                    } catch (webhookError) {
+                      console.warn(
+                        "[FOX CRM] External CRM webhook failed; Firestore booking remains saved.",
+                        webhookError
+                      );
+                    }
+                  }
+
+                  console.log(
+                    `[FOX CRM] Appointment saved | Workspace=${workspace.id} | Customer=${name} | ${date} ${time}`
+                  );
+
+                  functionResult = {
+                    success: true,
+                    appointmentId: appointment.id,
+                    leadId: lead.id,
+                    message:
+                      "Appointment booked successfully in FOX CRM."
+                  };
                 }
+
               } else if (call.name === "recordSale") {
                 const { itemName, price, customerName, customerPhone } = call.args as any;
                 // Log the sale to external CRM or Webhook if provided
@@ -726,20 +2395,47 @@ ${industryContext || "Standard business inquiry catalog."}
               functionResult = { error: err.message };
             }
             
-            // Send result back to model
-            formattedContents.push({
-              role: "model",
-              parts: [{ functionCall: call }]
-            });
+            // =====================================================
+            // IMPORTANT: Preserve Gemini's original model content.
+            // Gemini 3 function calls can contain thoughtSignature.
+            // Rebuilding the functionCall manually strips that signature
+            // and causes HTTP 400 on the follow-up request.
+            // =====================================================
+
+            const originalModelContent =
+              response?.candidates?.[0]?.content;
+
+            if (!originalModelContent?.parts?.length) {
+              throw new Error(
+                "Gemini function call returned without original model content"
+              );
+            }
+
+            // Push the ORIGINAL model response exactly as Gemini returned it.
+            // This preserves functionCall + thoughtSignature.
+            formattedContents.push(originalModelContent);
+
+            // Then provide our tool result.
             formattedContents.push({
               role: "user",
-              parts: [{ functionResponse: { name: call.name, response: functionResult } }]
+              parts: [
+                {
+                  functionResponse: {
+                    name: call.name,
+                    response: functionResult
+                  }
+                }
+              ]
             });
-            
+
             response = await ai.models.generateContent({
               model,
               contents: formattedContents,
-              config: { systemInstruction, temperature: 0.3, tools: tools.length > 0 ? tools : undefined }
+              config: {
+                systemInstruction,
+                temperature: 0.3,
+                tools: undefined
+              }
             });
           }
           

@@ -1,0 +1,271 @@
+import { db, sanitizeForFirestore } from "./firebase";
+import {
+  collection,
+  doc,
+  getDocs,
+  query,
+  setDoc,
+  where,
+} from "firebase/firestore";
+
+const makeId = (prefix: string) =>
+  `${prefix}_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+
+const normalizePhone = (phone: string) => {
+  let digits = String(phone || "").replace(/\D/g, "");
+
+  // Egypt: +20 11xxxxxxxx -> 011xxxxxxxx
+  if (digits.startsWith("20") && digits.length === 12) {
+    digits = "0" + digits.slice(2);
+  }
+
+  return digits;
+};
+
+export const workspaceDataService = {
+  async createAppointment(
+    workspaceId: string,
+    data: {
+      customerName: string;
+      phone: string;
+      date: string;
+      time: string;
+      channel?: string;
+      sessionId?: string;
+    }
+  ) {
+    const todayISO = new Date().toISOString().slice(0, 10);
+
+    if (
+      !/^\d{4}-\d{2}-\d{2}$/.test(data.date) ||
+      data.date < todayISO
+    ) {
+      throw new Error(
+        `Cannot create appointment in the past. Requested=${data.date}, Today=${todayISO}`
+      );
+    }
+
+    const id = makeId("apt");
+
+    const appointment = sanitizeForFirestore({
+      id,
+      workspaceId,
+      customerName: data.customerName,
+      phone: data.phone,
+      phoneNormalized: normalizePhone(data.phone),
+      date: data.date,
+      time: data.time,
+      channel: data.channel || "telegram",
+      sessionId: data.sessionId,
+      status: "Scheduled",
+      source: "ai_agent",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    // Tenant-isolated collection
+    await setDoc(
+      doc(db, "workspaces", workspaceId, "appointments", id),
+      appointment
+    );
+
+    // Compatibility with current dashboard
+    await setDoc(doc(db, "appointments", id), appointment);
+
+    return appointment;
+  },
+
+  async isAppointmentAvailable(
+    workspaceId: string,
+    date: string,
+    time: string
+  ) {
+    const todayISO = new Date().toISOString().slice(0, 10);
+
+    if (
+      !/^\d{4}-\d{2}-\d{2}$/.test(date) ||
+      date < todayISO
+    ) {
+      return false;
+    }
+
+    const ref = collection(
+      db,
+      "workspaces",
+      workspaceId,
+      "appointments"
+    );
+
+    const q = query(
+      ref,
+      where("date", "==", date),
+      where("time", "==", time)
+    );
+
+    const snapshot = await getDocs(q);
+
+    return snapshot.empty;
+  },
+
+  async upsertLead(
+    workspaceId: string,
+    data: {
+      name: string;
+      phone: string;
+      channel?: string;
+      sessionId?: string;
+    }
+  ) {
+    const ref = collection(
+      db,
+      "workspaces",
+      workspaceId,
+      "crmLeads"
+    );
+
+    const existingQuery = query(
+      ref,
+      where("phone", "==", data.phone)
+    );
+
+    const existing = await getDocs(existingQuery);
+
+    if (!existing.empty) {
+      return existing.docs[0].data();
+    }
+
+    const id = makeId("lead");
+
+    const lead = sanitizeForFirestore({
+      id,
+      workspaceId,
+      name: data.name,
+      phone: data.phone,
+      phoneNormalized: normalizePhone(data.phone),
+      channel: data.channel || "telegram",
+      sessionId: data.sessionId,
+      status: "New",
+      source: "ai_agent",
+      createdAt: new Date().toISOString(),
+    });
+
+    // Tenant-isolated CRM
+    await setDoc(
+      doc(db, "workspaces", workspaceId, "crmLeads", id),
+      lead
+    );
+
+    // Compatibility with current dashboard
+    await setDoc(doc(db, "crmLeads", id), lead);
+
+    return lead;
+  },
+
+  async getCustomerAppointments(
+    workspaceId: string,
+    phone: string
+  ) {
+    const ref = collection(
+      db,
+      "workspaces",
+      workspaceId,
+      "appointments"
+    );
+
+    const normalizedPhone = normalizePhone(phone);
+
+    // New records use phoneNormalized.
+    let snapshot = await getDocs(
+      query(
+        ref,
+        where("phoneNormalized", "==", normalizedPhone)
+      )
+    );
+
+    // Compatibility with older records created before normalization.
+    if (snapshot.empty) {
+      snapshot = await getDocs(
+        query(
+          ref,
+          where("phone", "==", phone)
+        )
+      );
+    }
+
+    const todayISO = new Date().toISOString().slice(0, 10);
+
+    return snapshot.docs
+      .map((d) => d.data())
+      .filter(
+        (apt: any) =>
+          apt.status !== "Cancelled" &&
+          String(apt.date || "") >= todayISO
+      )
+      .sort((a: any, b: any) =>
+        String(a.date || "").localeCompare(
+          String(b.date || "")
+        )
+      );
+  },
+
+  async getAppointmentsForDate(
+    workspaceId: string,
+    date: string
+  ) {
+    const ref = collection(
+      db,
+      "workspaces",
+      workspaceId,
+      "appointments"
+    );
+
+    const q = query(
+      ref,
+      where("date", "==", date)
+    );
+
+    const snapshot = await getDocs(q);
+
+    return snapshot.docs
+      .map((d) => d.data())
+      .filter((apt: any) =>
+        apt.status !== "Cancelled"
+      )
+      .sort((a: any, b: any) =>
+        String(a.time || "").localeCompare(
+          String(b.time || "")
+        )
+      );
+  },
+
+  async saveConversationEvent(
+    workspaceId: string,
+    sessionId: string,
+    data: {
+      sender: "user" | "bot";
+      text: string;
+      channel?: string;
+      agentRole?: string;
+    }
+  ) {
+    const id = makeId("msg");
+
+    const event = sanitizeForFirestore({
+      id,
+      workspaceId,
+      sessionId,
+      sender: data.sender,
+      text: data.text,
+      channel: data.channel || "telegram",
+      agentRole: data.agentRole,
+      createdAt: new Date().toISOString(),
+    });
+
+    await setDoc(
+      doc(db, "workspaces", workspaceId, "conversations", id),
+      event
+    );
+
+    return event;
+  },
+};
