@@ -5,6 +5,7 @@ import {
   getDocs,
   query,
   setDoc,
+  updateDoc,
   where,
 } from "firebase/firestore";
 
@@ -206,6 +207,41 @@ export const workspaceDataService = {
           String(b.date || "")
         )
       );
+  },
+
+  async cancelAppointment(
+    workspaceId: string,
+    appointmentId: string
+  ) {
+    const updates = sanitizeForFirestore({
+      status: "Cancelled",
+      cancelledAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    await updateDoc(
+      doc(db, "workspaces", workspaceId, "appointments", appointmentId),
+      updates
+    );
+
+    // Keep current dashboard root collection synchronized.
+    try {
+      await updateDoc(
+        doc(db, "appointments", appointmentId),
+        updates
+      );
+    } catch (err) {
+      console.warn(
+        "[FOX CRM] Legacy appointment cancellation sync failed:",
+        err
+      );
+    }
+
+    return {
+      success: true,
+      appointmentId,
+      status: "Cancelled",
+    };
   },
 
   async getAppointmentsForDate(

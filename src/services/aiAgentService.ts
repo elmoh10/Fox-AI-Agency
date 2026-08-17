@@ -595,6 +595,295 @@ ${industryContext || "Standard business inquiry catalog."}
     }
 
     // =========================================================
+    // DETERMINISTIC APPOINTMENT CANCELLATION
+    // Cancellation is a CRM transaction, not an LLM decision.
+    // =========================================================
+    if (workspace?.id && params.sessionId) {
+      const cancelCtx =
+        await sharedMemoryService.getContext(
+          workspace.id,
+          params.sessionId
+        );
+
+      const cancelMessage = String(message || "").trim();
+      const cancelLower = cancelMessage.toLowerCase();
+
+      const cancelIntent =
+        /(ألغي\s*(حجزي|الحجز|موعدي)|الغي\s*(حجزي|الحجز|موعدي)|إلغاء\s*(حجز|موعد)|الغاء\s*(حجز|موعد)|cancel\s*(my\s*)?(booking|appointment))/i.test(
+          cancelLower
+        );
+
+      const lastBot =
+        cancelCtx.messages
+          .slice()
+          .reverse()
+          .find((m) => m.sender === "bot")
+          ?.text || "";
+
+      const digitsOnly =
+        cancelMessage.replace(/\D/g, "");
+
+      const isPhone =
+        digitsOnly.length >= 10 &&
+        digitsOnly.length <= 15;
+
+      const waitingForCancelPhone =
+        /(رقم الموبايل.*إلغاء|رقم الموبايل.*الغاء|phone number.*cancel)/i.test(
+          lastBot
+        );
+
+      const waitingForCancelConfirm =
+        /(تأكيد إلغاء الحجز|تأكيد الغاء الحجز|confirm cancellation)/i.test(
+          lastBot
+        );
+
+      // Step 1: cancellation intent
+      if (cancelIntent && !isPhone) {
+        const reply =
+          messageLang === "ar"
+            ? "أكيد. ابعتلي رقم الموبايل المستخدم في الحجز علشان أراجع الحجز وأكمل إلغاءه."
+            : "Sure. Please send the phone number used for the booking so I can review it and continue the cancellation.";
+
+        await sharedMemoryService.appendMessage(
+          workspace.id,
+          params.sessionId,
+          {
+            sender: "user",
+            text: message,
+            time: new Date().toISOString(),
+            agentRole: "Support"
+          }
+        );
+
+        await sharedMemoryService.appendMessage(
+          workspace.id,
+          params.sessionId,
+          {
+            sender: "bot",
+            text: reply,
+            time: new Date().toISOString(),
+            agentRole: "Support"
+          }
+        );
+
+        console.log(
+          `🗑️ [FOX Booking] Waiting for cancellation phone | Workspace=${workspace.id}`
+        );
+
+        return {
+          response: reply,
+          aiResponse: reply,
+          detectedLanguage: messageLang,
+          source: "fox_cancel_flow",
+          suggestedActions: []
+        };
+      }
+
+      // Step 2: phone supplied after cancel request
+      if (waitingForCancelPhone && isPhone) {
+        const appointments =
+          await workspaceDataService.getCustomerAppointments(
+            workspace.id,
+            cancelMessage
+          );
+
+        if (appointments.length === 0) {
+          const reply =
+            messageLang === "ar"
+              ? "راجعت النظام ولم أجد أي حجز حالي أو قادم على رقم الموبايل ده."
+              : "I checked the system and found no current or upcoming booking on this phone number.";
+
+          return {
+            response: reply,
+            aiResponse: reply,
+            detectedLanguage: messageLang,
+            source: "firestore:cancel_lookup",
+            suggestedActions: []
+          };
+        }
+
+        if (appointments.length > 1) {
+          const lines = appointments.map(
+            (apt: any, index: number) =>
+              `${index + 1}) ${apt.date} - ${apt.time}`
+          );
+
+          const reply =
+            messageLang === "ar"
+              ? `لقيت أكتر من حجز على الرقم ده:\n\n${lines.join("\n")}\n\nاكتب رقم الحجز اللي عايز تلغيه.`
+              : `I found more than one booking:\n\n${lines.join("\n")}\n\nSend the number of the booking you want to cancel.`;
+
+          // store options in memory in a machine-readable line
+          const machineState =
+            `CANCEL_OPTIONS:${appointments
+              .map((apt: any) => apt.id)
+              .join(",")}`;
+
+          await sharedMemoryService.appendMessage(
+            workspace.id,
+            params.sessionId,
+            {
+              sender: "bot",
+              text: reply + "\n" + machineState,
+              time: new Date().toISOString(),
+              agentRole: "Support"
+            }
+          );
+
+          return {
+            response: reply,
+            aiResponse: reply,
+            detectedLanguage: messageLang,
+            source: "firestore:cancel_options",
+            suggestedActions: []
+          };
+        }
+
+        const apt: any = appointments[0];
+
+        const reply =
+          messageLang === "ar"
+            ? `لقيت الحجز ده:\n\nالتاريخ: ${apt.date}\nالوقت: ${apt.time}\n\nلو عايز تكمل، اكتب: تأكيد إلغاء الحجز`
+            : `I found this booking:\n\nDate: ${apt.date}\nTime: ${apt.time}\n\nTo continue, send: confirm cancellation`;
+
+        await sharedMemoryService.appendMessage(
+          workspace.id,
+          params.sessionId,
+          {
+            sender: "bot",
+            text:
+              reply +
+              `\nCANCEL_APPOINTMENT_ID:${apt.id}`,
+            time: new Date().toISOString(),
+            agentRole: "Support"
+          }
+        );
+
+        return {
+          response: reply,
+          aiResponse: reply,
+          detectedLanguage: messageLang,
+          source: "firestore:cancel_confirm",
+          suggestedActions: []
+        };
+      }
+
+      // Step 3a: choose from multiple appointments
+      const optionState =
+        cancelCtx.messages
+          .slice()
+          .reverse()
+          .find((m) =>
+            String(m.text || "").includes("CANCEL_OPTIONS:")
+          )
+          ?.text || "";
+
+      if (
+        /^\d+$/.test(cancelMessage) &&
+        optionState.includes("CANCEL_OPTIONS:")
+      ) {
+        const ids =
+          optionState
+            .split("CANCEL_OPTIONS:")[1]
+            ?.split(",")
+            .map((x) => x.trim())
+            .filter(Boolean) || [];
+
+        const choice = Number(cancelMessage) - 1;
+
+        if (choice >= 0 && choice < ids.length) {
+          const selectedId = ids[choice];
+
+          const reply =
+            messageLang === "ar"
+              ? "تمام. لو متأكد من إلغاء الحجز، اكتب: تأكيد إلغاء الحجز"
+              : "Okay. If you're sure, send: confirm cancellation";
+
+          await sharedMemoryService.appendMessage(
+            workspace.id,
+            params.sessionId,
+            {
+              sender: "bot",
+              text:
+                reply +
+                `\nCANCEL_APPOINTMENT_ID:${selectedId}`,
+              time: new Date().toISOString(),
+              agentRole: "Support"
+            }
+          );
+
+          return {
+            response: reply,
+            aiResponse: reply,
+            detectedLanguage: messageLang,
+            source: "firestore:cancel_selected",
+            suggestedActions: []
+          };
+        }
+      }
+
+      // Step 3b: final confirmation
+      const confirmCancel =
+        /(تأكيد\s*إلغاء\s*الحجز|تأكيد\s*الغاء\s*الحجز|confirm\s*cancellation)/i.test(
+          cancelMessage
+        );
+
+      if (confirmCancel) {
+        const idState =
+          cancelCtx.messages
+            .slice()
+            .reverse()
+            .find((m) =>
+              String(m.text || "").includes(
+                "CANCEL_APPOINTMENT_ID:"
+              )
+            )
+            ?.text || "";
+
+        const appointmentId =
+          idState.split("CANCEL_APPOINTMENT_ID:")[1]?.trim();
+
+        if (appointmentId) {
+          await workspaceDataService.cancelAppointment(
+            workspace.id,
+            appointmentId
+          );
+
+          console.log(
+            `🗑️ [FOX CRM] Appointment cancelled | Workspace=${workspace.id} | Appointment=${appointmentId}`
+          );
+
+          const reply =
+            messageLang === "ar"
+              ? "✅ تم إلغاء الحجز بنجاح. لو تحب، أقدر أساعدك تعمل حجز جديد."
+              : "✅ Your booking has been cancelled successfully.";
+
+          await sharedMemoryService.appendMessage(
+            workspace.id,
+            params.sessionId,
+            {
+              sender: "bot",
+              text: reply,
+              time: new Date().toISOString(),
+              agentRole: "Support"
+            }
+          );
+
+          return {
+            response: reply,
+            aiResponse: reply,
+            detectedLanguage: messageLang,
+            source: "firestore:cancelled",
+            suggestedActions:
+              messageLang === "ar"
+                ? ["حجز موعد جديد"]
+                : ["Book New Appointment"]
+          };
+        }
+      }
+    }
+
+    // =========================================================
     // DETERMINISTIC CUSTOMER APPOINTMENT LOOKUP
     // Never let the LLM invent whether a booking exists.
     // =========================================================
