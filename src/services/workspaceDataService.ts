@@ -105,7 +105,13 @@ export const workspaceDataService = {
 
     const snapshot = await getDocs(q);
 
-    return snapshot.empty;
+    // A slot is available when there are no ACTIVE bookings.
+    // Cancelled appointments must not keep the slot blocked.
+    const activeAppointments = snapshot.docs.filter(
+      (d) => d.data()?.status !== "Cancelled"
+    );
+
+    return activeAppointments.length === 0;
   },
 
   async upsertLead(
@@ -207,6 +213,54 @@ export const workspaceDataService = {
           String(b.date || "")
         )
       );
+  },
+
+  async updateAppointment(
+    workspaceId: string,
+    appointmentId: string,
+    updates: {
+      date?: string;
+      time?: string;
+      customerName?: string;
+      phone?: string;
+      status?: string;
+    }
+  ) {
+    const payload = sanitizeForFirestore({
+      ...updates,
+      updatedAt: new Date().toISOString(),
+    });
+
+    // Tenant source of truth
+    await updateDoc(
+      doc(
+        db,
+        "workspaces",
+        workspaceId,
+        "appointments",
+        appointmentId
+      ),
+      payload
+    );
+
+    // Compatibility with current dashboard root collection
+    try {
+      await updateDoc(
+        doc(db, "appointments", appointmentId),
+        payload
+      );
+    } catch (err) {
+      console.warn(
+        "[FOX CRM] Legacy appointment update sync failed:",
+        err
+      );
+    }
+
+    return {
+      success: true,
+      appointmentId,
+      ...payload,
+    };
   },
 
   async cancelAppointment(

@@ -595,6 +595,552 @@ ${industryContext || "Standard business inquiry catalog."}
     }
 
     // =========================================================
+    // DETERMINISTIC APPOINTMENT MODIFICATION
+    // Firestore is the source of truth.
+    // Never create a new booking when modifying an existing one.
+    // =========================================================
+    if (workspace?.id && params.sessionId) {
+      const modifyCtx =
+        await sharedMemoryService.getContext(
+          workspace.id,
+          params.sessionId
+        );
+
+      const modifyMessage =
+        String(message || "").trim();
+
+      const lastModifyBot =
+        modifyCtx.messages
+          .slice()
+          .reverse()
+          .find((m) => m.sender === "bot")
+          ?.text || "";
+
+      const modifyIntent =
+        /(عاوز|عايز|أريد|اريد)?\s*(أعدل|اعدل|تعديل|أغير|اغير|تغيير)\s*(حجزي|الحجز|موعدي|الموعد)|modify\s*(my\s*)?(booking|appointment)|change\s*(my\s*)?(booking|appointment)/i.test(
+          modifyMessage
+        );
+
+      const phoneDigits =
+        modifyMessage.replace(/\D/g, "");
+
+      const looksLikeModifyPhone =
+        phoneDigits.length >= 10 &&
+        phoneDigits.length <= 15;
+
+      const saveModifyUserMessage = async () => {
+        await sharedMemoryService.appendMessage(
+          workspace.id,
+          params.sessionId,
+          {
+            sender: "user",
+            text: message,
+            time: new Date().toISOString(),
+            agentRole: "Support"
+          }
+        );
+      };
+
+      // --------------------------------------------------------
+      // STEP 1: Customer asks to modify booking
+      // --------------------------------------------------------
+      if (modifyIntent) {
+        await saveModifyUserMessage();
+
+        const reply =
+          messageLang === "ar"
+            ? "تمام ✅ ابعتلي رقم الموبايل المستخدم في الحجز علشان أجيب الحجز اللي عايز تعدله."
+            : "Sure ✅ Please send the phone number used for the booking.";
+
+        await sharedMemoryService.appendMessage(
+          workspace.id,
+          params.sessionId,
+          {
+            sender: "bot",
+            text: reply + "\nMODIFY_STATE:WAIT_PHONE",
+            time: new Date().toISOString(),
+            agentRole: "Support"
+          }
+        );
+
+        console.log(
+          `✏️ [FOX Booking] Waiting for modification phone | Workspace=${workspace.id}`
+        );
+
+        return {
+          response: reply,
+          aiResponse: reply,
+          detectedLanguage: messageLang,
+          source: "fox_modify_flow",
+          suggestedActions: []
+        };
+      }
+
+      // --------------------------------------------------------
+      // STEP 2: Receive customer phone
+      // --------------------------------------------------------
+      if (
+        lastModifyBot.includes("MODIFY_STATE:WAIT_PHONE") &&
+        looksLikeModifyPhone
+      ) {
+        await saveModifyUserMessage();
+
+        const appointments =
+          await workspaceDataService.getCustomerAppointments(
+            workspace.id,
+            modifyMessage
+          );
+
+        console.log(
+          `✏️ [FOX CRM] Modification lookup | Workspace=${workspace.id} | Count=${appointments.length}`
+        );
+
+        if (appointments.length === 0) {
+          const reply =
+            messageLang === "ar"
+              ? "ملقتش أي حجز حالي أو قادم على رقم الموبايل ده."
+              : "No current or upcoming appointment was found.";
+
+          await sharedMemoryService.appendMessage(
+            workspace.id,
+            params.sessionId,
+            {
+              sender: "bot",
+              text: reply,
+              time: new Date().toISOString(),
+              agentRole: "Support"
+            }
+          );
+
+          return {
+            response: reply,
+            aiResponse: reply,
+            detectedLanguage: messageLang,
+            source: "firestore:modify_lookup",
+            suggestedActions: []
+          };
+        }
+
+        // One booking -> select automatically
+        if (appointments.length === 1) {
+          const apt: any = appointments[0];
+
+          const reply =
+            messageLang === "ar"
+              ? `لقيت الحجز ده:\n\nالتاريخ الحالي: ${apt.date}\nالوقت الحالي: ${apt.time}\n\nاكتب التاريخ والوقت الجديد، مثال:\n19 أغسطس الساعة 1 مساء`
+              : `Current appointment: ${apt.date} at ${apt.time}.\nSend the new date and time.`;
+
+          await sharedMemoryService.appendMessage(
+            workspace.id,
+            params.sessionId,
+            {
+              sender: "bot",
+              text:
+                reply +
+                `\nMODIFY_TARGET:${apt.id}`,
+              time: new Date().toISOString(),
+              agentRole: "Support"
+            }
+          );
+
+          return {
+            response: reply,
+            aiResponse: reply,
+            detectedLanguage: messageLang,
+            source: "firestore:modify_target",
+            suggestedActions: []
+          };
+        }
+
+        // Multiple bookings -> customer chooses
+        const lines =
+          appointments.map(
+            (apt: any, index: number) =>
+              `${index + 1}) ${apt.date} — ${apt.time}`
+          );
+
+        const reply =
+          messageLang === "ar"
+            ? `لقيت ${appointments.length} حجوزات:\n\n${lines.join("\n")}\n\nاكتب رقم الحجز اللي عايز تعدله.`
+            : `I found ${appointments.length} appointments:\n\n${lines.join("\n")}\n\nSend the number to modify.`;
+
+        await sharedMemoryService.appendMessage(
+          workspace.id,
+          params.sessionId,
+          {
+            sender: "bot",
+            text:
+              reply +
+              `\nMODIFY_OPTIONS:${appointments
+                .map((apt: any) => apt.id)
+                .join(",")}`,
+            time: new Date().toISOString(),
+            agentRole: "Support"
+          }
+        );
+
+        return {
+          response: reply,
+          aiResponse: reply,
+          detectedLanguage: messageLang,
+          source: "firestore:modify_options",
+          suggestedActions: []
+        };
+      }
+
+      // --------------------------------------------------------
+      // STEP 3: Select one appointment
+      // --------------------------------------------------------
+      if (
+        lastModifyBot.includes("MODIFY_OPTIONS:") &&
+        /^\d+$/.test(modifyMessage)
+      ) {
+        await saveModifyUserMessage();
+
+        const ids =
+          lastModifyBot
+            .split("MODIFY_OPTIONS:")[1]
+            ?.trim()
+            .split(",")
+            .map((x) => x.trim())
+            .filter(Boolean) || [];
+
+        const choice =
+          Number(modifyMessage) - 1;
+
+        if (
+          choice < 0 ||
+          choice >= ids.length
+        ) {
+          const reply =
+            messageLang === "ar"
+              ? "اختيار غير صحيح. ابعت رقم الحجز الموجود في القائمة."
+              : "Invalid selection.";
+
+          return {
+            response: reply,
+            aiResponse: reply,
+            detectedLanguage: messageLang,
+            source: "fox_modify_invalid_selection",
+            suggestedActions: []
+          };
+        }
+
+        const selectedId =
+          ids[choice];
+
+        const reply =
+          messageLang === "ar"
+            ? "تمام. اكتب التاريخ والوقت الجديد، مثال: 19 أغسطس الساعة 1 مساء."
+            : "Send the new appointment date and time.";
+
+        await sharedMemoryService.appendMessage(
+          workspace.id,
+          params.sessionId,
+          {
+            sender: "bot",
+            text:
+              reply +
+              `\nMODIFY_TARGET:${selectedId}`,
+            time: new Date().toISOString(),
+            agentRole: "Support"
+          }
+        );
+
+        return {
+          response: reply,
+          aiResponse: reply,
+          detectedLanguage: messageLang,
+          source: "firestore:modify_selected",
+          suggestedActions: []
+        };
+      }
+
+      // --------------------------------------------------------
+      // STEP 4: Receive new date/time
+      // --------------------------------------------------------
+      if (
+        lastModifyBot.includes("MODIFY_TARGET:")
+      ) {
+        const appointmentId =
+          lastModifyBot
+            .split("MODIFY_TARGET:")[1]
+            ?.trim()
+            .split(/\s/)[0];
+
+        await saveModifyUserMessage();
+
+        const now = new Date();
+
+        const months: Record<string, number> = {
+          "يناير": 1,
+          "فبراير": 2,
+          "مارس": 3,
+          "أبريل": 4,
+          "ابريل": 4,
+          "مايو": 5,
+          "يونيو": 6,
+          "يوليو": 7,
+          "أغسطس": 8,
+          "اغسطس": 8,
+          "سبتمبر": 9,
+          "أكتوبر": 10,
+          "اكتوبر": 10,
+          "نوفمبر": 11,
+          "ديسمبر": 12
+        };
+
+        let newDate = "";
+        let newTime = "";
+
+        // Example: 19 الشهر ده
+        const thisMonthMatch =
+          modifyMessage.match(
+            /(\d{1,2})\s*(?:الشهر\s*ده|هذا\s*الشهر)/i
+          );
+
+        if (thisMonthMatch) {
+          newDate =
+            `${now.getFullYear()}-` +
+            `${String(now.getMonth() + 1).padStart(2, "0")}-` +
+            `${String(Number(thisMonthMatch[1])).padStart(2, "0")}`;
+        }
+
+        // Example: 19 أغسطس / 19 أغسطس 2026
+        if (!newDate) {
+          const dateMatch =
+            modifyMessage.match(
+              /(\d{1,2})\s+(يناير|فبراير|مارس|أبريل|ابريل|مايو|يونيو|يوليو|أغسطس|اغسطس|سبتمبر|أكتوبر|اكتوبر|نوفمبر|ديسمبر)(?:\s+(\d{4}))?/i
+            );
+
+          if (dateMatch) {
+            const day =
+              Number(dateMatch[1]);
+
+            const month =
+              months[dateMatch[2]];
+
+            const year =
+              Number(dateMatch[3] || now.getFullYear());
+
+            newDate =
+              `${year}-` +
+              `${String(month).padStart(2, "0")}-` +
+              `${String(day).padStart(2, "0")}`;
+          }
+        }
+
+        // Example: الساعة 1 مساء
+        const timeMatch =
+          modifyMessage.match(
+            /(?:الساعة\s*)(\d{1,2})(?::(\d{2}))?\s*(صباحاً|صباحا|صباحًا|صباح|ظهراً|ظهرا|ظهرًا|ظهر|مساءً|مساءا|مساء)/i
+          );
+
+        if (timeMatch) {
+          const hour =
+            Number(timeMatch[1]);
+
+          const minute =
+            Number(timeMatch[2] || 0);
+
+          const period =
+            String(timeMatch[3]);
+
+          if (
+            hour >= 1 &&
+            hour <= 12 &&
+            minute >= 0 &&
+            minute <= 59
+          ) {
+            const suffix =
+              /ظهر|مساء/.test(period)
+                ? "PM"
+                : "AM";
+
+            newTime =
+              `${String(hour).padStart(2, "0")}:` +
+              `${String(minute).padStart(2, "0")} ${suffix}`;
+          }
+        }
+
+        const todayISO =
+          new Date()
+            .toISOString()
+            .slice(0, 10);
+
+        if (
+          !appointmentId ||
+          !newDate ||
+          !newTime ||
+          newDate < todayISO
+        ) {
+          const reply =
+            messageLang === "ar"
+              ? "التاريخ أو الوقت غير واضح. اكتبه بالشكل ده مثلاً:\n19 أغسطس الساعة 1 مساء"
+              : "Please send a valid future date and time.";
+
+          return {
+            response: reply,
+            aiResponse: reply,
+            detectedLanguage: messageLang,
+            source: "fox_modify_parser",
+            suggestedActions: []
+          };
+        }
+
+        const available =
+          await workspaceDataService.isAppointmentAvailable(
+            workspace.id,
+            newDate,
+            newTime
+          );
+
+        if (!available) {
+          const reply =
+            messageLang === "ar"
+              ? `الموعد ${newDate} الساعة ${newTime} غير متاح ❌\nاختار موعد تاني.`
+              : "That slot is unavailable.";
+
+          return {
+            response: reply,
+            aiResponse: reply,
+            detectedLanguage: messageLang,
+            source: "firestore:modify_unavailable",
+            suggestedActions: []
+          };
+        }
+
+        const reply =
+          messageLang === "ar"
+            ? `الموعد الجديد متاح ✅\n\nالتاريخ الجديد: ${newDate}\nالوقت الجديد: ${newTime}\n\nلو متأكد اكتب: تأكيد التغيير`
+            : `The new slot is available ✅\nSend: confirm`;
+
+        await sharedMemoryService.appendMessage(
+          workspace.id,
+          params.sessionId,
+          {
+            sender: "bot",
+            text:
+              reply +
+              `\nMODIFY_PENDING:${appointmentId}|${newDate}|${newTime}`,
+            time: new Date().toISOString(),
+            agentRole: "Support"
+          }
+        );
+
+        console.log(
+          `✏️ [FOX Booking] Modification pending | Workspace=${workspace.id} | Appointment=${appointmentId} | ${newDate} ${newTime}`
+        );
+
+        return {
+          response: reply,
+          aiResponse: reply,
+          detectedLanguage: messageLang,
+          source: "firestore:modify_pending",
+          suggestedActions: []
+        };
+      }
+
+      // --------------------------------------------------------
+      // STEP 5: Final confirmation -> REAL Firestore update
+      // --------------------------------------------------------
+      if (
+        lastModifyBot.includes("MODIFY_PENDING:")
+      ) {
+        const confirmModify =
+          /^(تأكيد\s*التغيير|تاكيد\s*التغيير|تأكيد|تاكيد|أكد|اكد|نعم|ايوه|أيوه|confirm|yes)$/i.test(
+            modifyMessage
+          );
+
+        if (confirmModify) {
+          await saveModifyUserMessage();
+
+          const raw =
+            lastModifyBot
+              .split("MODIFY_PENDING:")[1]
+              ?.trim();
+
+          const [
+            appointmentId,
+            newDate,
+            newTime
+          ] = raw.split("|");
+
+          // Final availability re-check immediately before write
+          const stillAvailable =
+            await workspaceDataService.isAppointmentAvailable(
+              workspace.id,
+              newDate,
+              newTime
+            );
+
+          if (!stillAvailable) {
+            const reply =
+              messageLang === "ar"
+                ? "للأسف الموعد اتاخد قبل التأكيد ❌ اختار موعد تاني."
+                : "The slot was taken before confirmation.";
+
+            return {
+              response: reply,
+              aiResponse: reply,
+              detectedLanguage: messageLang,
+              source: "firestore:modify_conflict",
+              suggestedActions: []
+            };
+          }
+
+          const result =
+            await workspaceDataService.updateAppointment(
+              workspace.id,
+              appointmentId,
+              {
+                date: newDate,
+                time: newTime,
+                status: "Scheduled"
+              }
+            );
+
+          if (!result?.success) {
+            throw new Error(
+              "Firestore appointment update did not succeed"
+            );
+          }
+
+          console.log(
+            `✏️ [FOX CRM] Appointment updated | Workspace=${workspace.id} | Appointment=${appointmentId} | ${newDate} ${newTime}`
+          );
+
+          const reply =
+            messageLang === "ar"
+              ? `✅ تم تعديل الحجز بنجاح.\n\nالتاريخ الجديد: ${newDate}\nالوقت الجديد: ${newTime}`
+              : `✅ Your appointment was updated successfully.\n\nDate: ${newDate}\nTime: ${newTime}`;
+
+          await sharedMemoryService.appendMessage(
+            workspace.id,
+            params.sessionId,
+            {
+              sender: "bot",
+              text: reply,
+              time: new Date().toISOString(),
+              agentRole: "Support"
+            }
+          );
+
+          return {
+            response: reply,
+            aiResponse: reply,
+            detectedLanguage: messageLang,
+            source: "firestore:modified",
+            suggestedActions:
+              messageLang === "ar"
+                ? ["عرض حجوزاتي", "إلغاء الحجز"]
+                : ["My Appointments", "Cancel Appointment"]
+          };
+        }
+      }
+    }
+
+    // =========================================================
     // DETERMINISTIC APPOINTMENT CANCELLATION
     // Cancellation is a CRM transaction, not an LLM decision.
     // =========================================================
@@ -823,9 +1369,15 @@ ${industryContext || "Standard business inquiry catalog."}
       }
 
       // Step 3b: final confirmation
+      const hasPendingCancellation =
+        cancelCtx.messages.some((m) =>
+          String(m.text || "").includes("CANCEL_APPOINTMENT_ID:")
+        );
+
       const confirmCancel =
-        /(تأكيد\s*إلغاء\s*الحجز|تأكيد\s*الغاء\s*الحجز|confirm\s*cancellation)/i.test(
-          cancelMessage
+        hasPendingCancellation &&
+        /^(تأكيد|تاكيد|أكد|اكد|نعم|ايوه|أيوه|yes|confirm|تأكيد\s*إلغاء\s*الحجز|تاكيد\s*الغاء\s*الحجز|confirm\s*cancellation)$/i.test(
+          cancelMessage.trim()
         );
 
       if (confirmCancel) {
