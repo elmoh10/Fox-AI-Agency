@@ -1,5 +1,9 @@
 import React from "react";
 import { useApp } from "../context/AppContext";
+import {
+  canWorkspaceUseFeature,
+  getIndustryModuleName,
+} from "../services/entitlementService";
 import { useTranslation } from "../services/LanguageService";
 import {
   BookOpen,
@@ -87,6 +91,13 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
   ).length;
 
   const industry = currentWorkspace?.industry || "Small Business";
+
+  // Centralized subscription feature gate.
+  // Super Admin can inspect all modules.
+  const canUse = (feature: any) =>
+    isSuperAdmin ||
+    canWorkspaceUseFeature(currentWorkspace, feature);
+
 
   const getIndustryIcon = () => {
     switch (industry) {
@@ -349,6 +360,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
           </button>
 
           {/* Industry Specific Module */}
+          {canUse("industry_module") && (
           <button
             data-tour="tour-client-industry"
             onClick={() => setActiveTab("client_industry_module")}
@@ -361,8 +373,17 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
             {getIndustryIcon()}
             <span>{getIndustryLabel()}</span>
           </button>
+          )}
 
-          {(isSuperAdmin || industry === "Clinic") && (
+          {(isSuperAdmin ||
+            (
+              canUse("appointments") &&
+              (
+                industry === "Clinic" ||
+                industry === "Restaurant" ||
+                industry === "Course Center"
+              )
+            )) && (
             <button
               onClick={() => setActiveTab("client_appointments")}
               className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-xs font-semibold transition-colors ${
@@ -376,6 +397,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
             </button>
           )}
 
+          {canUse("complaints") && (
           <button
             onClick={() => setActiveTab("client_complaints")}
             className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-xs font-semibold transition-colors ${
@@ -387,6 +409,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
             <MessageSquareWarning className="h-4 w-4" />
             <span>{isAr ? "الشكاوى والبلاغات" : "Complaints & Escalations"}</span>
           </button>
+          )}
 
           {(isSuperAdmin || industry === "Pharmacy" || industry === "Retail" || industry === "Restaurant") && (
             <button
@@ -425,6 +448,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
             <Tag className="h-4 w-4" />
             <span>{isAr ? "العروض والكوبونات" : "Promotions & Coupons"}</span>
           </button>
+          {canUse("custom_prompt") && (
           <button
             data-tour="tour-client-ai-settings"
             onClick={() => setActiveTab("client_ai_settings")}
@@ -437,7 +461,9 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
             <Sparkles className="h-4 w-4 text-amber-500" />
             <span>{isAr ? "إعدادات وكيل AI والقوالب" : "AI Agent & Custom Prompts"}</span>
           </button>
+          )}
 
+          {canUse("telegram") && (
           <button
             data-tour="tour-client-telegram"
             onClick={() => setActiveTab("client_telegram")}
@@ -450,7 +476,9 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
             <Bot className="h-4 w-4 text-blue-500" />
             <span>{isAr ? "ربط بوت التليجرام (Telegram Token)" : "Telegram Access Token"}</span>
           </button>
+          )}
 
+          {canUse("whatsapp") && (
           <button
             onClick={() => setActiveTab("client_whatsapp")}
             className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-xs font-semibold transition-colors ${
@@ -462,6 +490,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
             <MessageCircle className="h-4 w-4 text-emerald-500" />
             <span>{isAr ? "ربط الواتس اب (QR Code)" : "WhatsApp (QR Code)"}</span>
           </button>
+          )}
 
           <button
             data-tour="tour-client-live-simulator"
@@ -608,10 +637,39 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
       {/* Subscription Progress Box */}
       {(() => {
         const used = currentWorkspace?.aiConversationsUsed || 0;
-        const planBaseLimit = currentWorkspace?.planId === "starter" ? 200 : currentWorkspace?.planId === "enterprise" ? 2000 : 1000;
-        const extraLimit = currentWorkspace?.extraConversationsLimit || 0;
-        const totalLimit = planBaseLimit + extraLimit;
-        const pct = Math.min(100, Math.round((used / totalLimit) * 100));
+        const isUnlimited = currentWorkspace?.planId === "enterprise";
+
+        const baseLimit =
+          currentWorkspace?.planId === "starter"
+            ? 50
+            : currentWorkspace?.planId === "business"
+              ? 1000
+              : -1;
+
+        const extraLimit =
+          currentWorkspace?.extraConversationsLimit || 0;
+
+        const totalLimit =
+          isUnlimited
+            ? -1
+            : baseLimit + extraLimit;
+
+        const remaining =
+          isUnlimited
+            ? -1
+            : typeof currentWorkspace?.creditBalance === "number"
+              ? currentWorkspace.creditBalance
+              : Math.max(0, totalLimit - used);
+
+        const pct =
+          isUnlimited
+            ? 0
+            : totalLimit > 0
+              ? Math.min(
+                  100,
+                  Math.round((used / totalLimit) * 100)
+                )
+              : 100;
 
         return (
           <div className="pt-4 border-t border-slate-200 dark:border-slate-800 space-y-3">
@@ -629,7 +687,13 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
               </div>
               <div className="flex items-center justify-between mt-2">
                 <p className="text-[10px] text-slate-500 dark:text-slate-400 font-mono">
-                  {used} / {totalLimit} {isAr ? "محادثة" : "convs"}
+                  {isUnlimited
+                    ? (isAr
+                        ? `${used} مستخدمة / غير محدود`
+                        : `${used} used / Unlimited`)
+                    : (isAr
+                        ? `${remaining} متبقية من ${totalLimit}`
+                        : `${remaining} remaining of ${totalLimit}`)}
                 </p>
                 {extraLimit > 0 && (
                   <span className="text-[9px] text-emerald-600 dark:text-emerald-400 font-bold">

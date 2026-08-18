@@ -1,3 +1,7 @@
+import {
+  canWorkspaceUseFeature,
+  FoxFeature,
+} from "./src/services/entitlementService";
 import express from "express";
 import path from "path";
 import dotenv from "dotenv";
@@ -817,27 +821,107 @@ app.post("/api/ai/extract-knowledge", async (req, res) => {
 
 app.post("/api/ai/chat", async (req, res) => {
   try {
-    const { workspace, customerMessage, userMessage, channel = "telegram", chatHistory = [], overrideConfig, sessionId } = req.body;
+    const {
+      workspace,
+      workspaceId,
+      customerMessage,
+      userMessage,
+      channel = "telegram",
+      chatHistory = [],
+      overrideConfig,
+      sessionId
+    } = req.body;
 
     const message = customerMessage || userMessage;
 
     if (!message) {
-      return res.status(400).json({ error: "customerMessage or userMessage is required" });
+      return res.status(400).json({
+        error: "customerMessage or userMessage is required"
+      });
     }
 
-    const result = await aiAgentService.generateChatResponse({
-      workspace,
-      message,
-      channel,
-      chatHistory,
-      overrideConfig,
-      sessionId,
-    });
+    // ========================================================
+    // SECURITY:
+    // Never trust workspace subscription/credit data supplied
+    // by the browser.
+    // ========================================================
+
+    const requestedWorkspaceId =
+      workspaceId || workspace?.id;
+
+    if (!requestedWorkspaceId) {
+      return res.status(400).json({
+        error: "workspaceId is required",
+        code: "WORKSPACE_ID_REQUIRED"
+      });
+    }
+
+    const trustedWorkspace =
+      resolveTrustedWorkspace(requestedWorkspaceId);
+
+    if (!trustedWorkspace) {
+      console.warn(
+        `🚫 [FOX Security] Unknown workspace attempted AI access | Workspace=${requestedWorkspaceId}`
+      );
+
+      return res.status(404).json({
+        error: "Workspace not found",
+        code: "WORKSPACE_NOT_FOUND"
+      });
+    }
+
+    // Channel entitlement must be enforced server-side.
+    if (channel === "telegram") {
+      const access =
+        requireWorkspaceFeature(
+          trustedWorkspace,
+          "telegram"
+        );
+
+      if (!access.allowed) {
+        return res.status(access.status).json(access);
+      }
+    }
+
+    if (channel === "whatsapp") {
+      const access =
+        requireWorkspaceFeature(
+          trustedWorkspace,
+          "whatsapp"
+        );
+
+      if (!access.allowed) {
+        return res.status(access.status).json(access);
+      }
+    }
+
+    console.log(
+      `🛡️ [FOX Security] Trusted workspace resolved | Workspace=${trustedWorkspace.id} | Plan=${trustedWorkspace.planId} | Channel=${channel}`
+    );
+
+    const result =
+      await aiAgentService.generateChatResponse({
+        workspace: trustedWorkspace,
+        message,
+        channel,
+        chatHistory,
+        overrideConfig,
+        sessionId,
+      });
 
     return res.json(result);
+
   } catch (error: any) {
-    console.error("AI Chat Route Error:", error);
-    return res.status(500).json({ error: error.message || "Failed to process AI response" });
+    console.error(
+      "AI Chat Route Error:",
+      error
+    );
+
+    return res.status(500).json({
+      error:
+        error.message ||
+        "Failed to process AI response"
+    });
   }
 });
 
@@ -2221,6 +2305,76 @@ async function callWorkspaceTelegramApi(
   }
 }
 
+
+/**
+ * FOX Backend Subscription Enforcement
+ *
+ * IMPORTANT:
+ * Never trust planId / creditBalance / entitlements supplied by
+ * a browser request. The registered server workspace is the
+ * source of truth.
+ */
+function requireWorkspaceFeature(
+  workspace: any,
+  feature: FoxFeature
+) {
+  if (!workspace?.id) {
+    return {
+      allowed: false,
+      status: 404,
+      code: "WORKSPACE_NOT_FOUND",
+      message: "Workspace not found",
+    };
+  }
+
+  if (!canWorkspaceUseFeature(workspace, feature)) {
+    console.warn(
+      `🔒 [FOX Entitlement] Blocked | Workspace=${workspace.id} | Plan=${workspace.planId || "unknown"} | Feature=${feature}`
+    );
+
+    return {
+      allowed: false,
+      status: 403,
+      code: "FEATURE_NOT_INCLUDED",
+      feature,
+      planId: workspace.planId || null,
+      message:
+        "This feature is not included in the current subscription plan.",
+    };
+  }
+
+  console.log(
+    `🔓 [FOX Entitlement] Allowed | Workspace=${workspace.id} | Plan=${workspace.planId || "unknown"} | Feature=${feature}`
+  );
+
+  return {
+    allowed: true,
+    status: 200,
+    feature,
+    planId: workspace.planId,
+  };
+}
+
+function resolveTrustedWorkspace(
+  requestedWorkspace: any
+) {
+  const workspaceId =
+    typeof requestedWorkspace === "string"
+      ? requestedWorkspace
+      : requestedWorkspace?.id;
+
+  if (!workspaceId) {
+    return null;
+  }
+
+  return (
+    registeredWorkspacesStore.find(
+      (workspace) =>
+        String(workspace.id) === String(workspaceId)
+    ) || null
+  );
+}
+
 function getWorkspaceById(workspaceId: string) {
   return registeredWorkspacesStore.find(
     (workspace) => String(workspace.id) === String(workspaceId)
@@ -2232,6 +2386,21 @@ async function generateWorkspaceTelegramReply(
   chatId: string,
   userMsg: string
 ) {
+  // Server-side subscription enforcement.
+  const telegramAccess =
+    requireWorkspaceFeature(
+      workspace,
+      "telegram"
+    );
+
+  if (!telegramAccess.allowed) {
+    console.warn(
+      `🔒 [FOX Telegram] Subscription blocked | Workspace=${workspace?.id}`
+    );
+
+    return "خدمة Telegram غير متاحة ضمن الباقة الحالية للمنشأة. يرجى التواصل مع إدارة المنشأة أو ترقية الاشتراك.";
+  }
+
   const result = await aiAgentService.generateChatResponse({
     workspace,
     message: userMsg,

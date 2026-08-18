@@ -7,7 +7,11 @@ import { OnboardingTour } from "./components/OnboardingTour";
 import { LoginModal } from "./components/LoginModal";
 import { RegistrationFeedbackToast } from "./components/RegistrationFeedbackToast";
 import { AuthPortal } from "./components/auth/AuthPortal";
-import { ShieldAlert, ShieldCheck } from "lucide-react";
+import { ShieldAlert, ShieldCheck, LockKeyhole } from "lucide-react";
+import {
+  canWorkspaceUseFeature,
+  FoxFeature,
+} from "./services/entitlementService";
 
 // Admin Views
 import { AdminDashboard } from "./components/admin/AdminDashboard";
@@ -111,6 +115,77 @@ const WorkspaceGuard: React.FC<{ children: React.ReactNode }> = ({ children }) =
   );
 };
 
+
+/**
+ * PlanFeatureGuard
+ *
+ * Second authorization layer after WorkspaceGuard.
+ *
+ * WorkspaceGuard = tenant isolation.
+ * PlanFeatureGuard = subscription entitlement enforcement.
+ */
+const PlanFeatureGuard: React.FC<{
+  feature: FoxFeature;
+  children: React.ReactNode;
+}> = ({ feature, children }) => {
+  const {
+    currentUser,
+    currentWorkspace,
+    language,
+  } = useApp();
+
+  const isAr = language === "ar";
+
+  // Agency owner bypasses tenant plan restrictions.
+  if (currentUser?.role === "super_admin") {
+    return <>{children}</>;
+  }
+
+  if (!currentWorkspace) {
+    return null;
+  }
+
+  if (canWorkspaceUseFeature(currentWorkspace, feature)) {
+    return <>{children}</>;
+  }
+
+  const planName =
+    currentWorkspace.planId === "starter"
+      ? isAr ? "Starter" : "Starter"
+      : currentWorkspace.planId === "business"
+      ? isAr ? "Business" : "Business"
+      : isAr ? "Enterprise" : "Enterprise";
+
+  return (
+    <div className="my-6 rounded-3xl border border-amber-500/30 bg-amber-500/10 p-8 text-center space-y-4 animate-fade-in">
+      <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-amber-500/20 text-amber-500">
+        <LockKeyhole className="h-7 w-7" />
+      </div>
+
+      <div>
+        <h2 className="text-xl font-black text-amber-500">
+          {isAr
+            ? "هذه الميزة غير متاحة في باقتك الحالية"
+            : "This feature is not included in your current plan"}
+        </h2>
+
+        <p className="mt-2 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+          {isAr
+            ? `منشأتك مشتركة حالياً في باقة ${planName}. يمكنك ترقية الاشتراك للاستفادة من هذه الميزة.`
+            : `Your workspace is currently subscribed to the ${planName} plan. Upgrade your subscription to unlock this feature.`}
+        </p>
+      </div>
+
+      <div className="inline-flex items-center gap-2 rounded-full border border-amber-500/20 bg-amber-500/10 px-4 py-2 text-[11px] font-bold text-amber-500">
+        <LockKeyhole className="h-3.5 w-3.5" />
+        {isAr
+          ? `الخطة الحالية: ${planName}`
+          : `Current plan: ${planName}`}
+      </div>
+    </div>
+  );
+};
+
 const AppContent: React.FC = () => {
   const { currentUser } = useApp();
   const [activeTab, setActiveTab] = useState<ViewTab>("admin_dashboard");
@@ -163,43 +238,57 @@ const AppContent: React.FC = () => {
       case "client_crm":
         return (
           <WorkspaceGuard>
-            <ClientCRM />
+            <PlanFeatureGuard feature="crm">
+              <ClientCRM />
+            </PlanFeatureGuard>
           </WorkspaceGuard>
         );
       case "client_industry_module":
         return (
           <WorkspaceGuard>
-            <ClientIndustryModule />
+            <PlanFeatureGuard feature="industry_module">
+              <ClientIndustryModule />
+            </PlanFeatureGuard>
           </WorkspaceGuard>
         );
       case "client_appointments":
         return (
           <WorkspaceGuard>
-            <ClientAppointments />
+            <PlanFeatureGuard feature="appointments">
+              <ClientAppointments />
+            </PlanFeatureGuard>
           </WorkspaceGuard>
         );
       case "client_complaints":
         return (
           <WorkspaceGuard>
-            <ClientComplaints />
+            <PlanFeatureGuard feature="complaints">
+              <ClientComplaints />
+            </PlanFeatureGuard>
           </WorkspaceGuard>
         );
       case "client_ai_settings":
         return (
           <WorkspaceGuard>
-            <ClientAISettings />
+            <PlanFeatureGuard feature="custom_prompt">
+              <ClientAISettings />
+            </PlanFeatureGuard>
           </WorkspaceGuard>
         );
       case "client_telegram":
         return (
           <WorkspaceGuard>
-            <ClientTelegramToken />
+            <PlanFeatureGuard feature="telegram">
+              <ClientTelegramToken />
+            </PlanFeatureGuard>
           </WorkspaceGuard>
         );
       case "client_whatsapp":
         return (
           <WorkspaceGuard>
-            <ClientWhatsAppQR />
+            <PlanFeatureGuard feature="whatsapp">
+              <ClientWhatsAppQR />
+            </PlanFeatureGuard>
           </WorkspaceGuard>
         );
       case "client_live_simulator":
@@ -217,13 +306,17 @@ const AppContent: React.FC = () => {
       case "client_n8n":
         return (
           <WorkspaceGuard>
-            <ClientN8n />
+            <PlanFeatureGuard feature="n8n">
+              <ClientN8n />
+            </PlanFeatureGuard>
           </WorkspaceGuard>
         );
       case "client_staff":
         return (
           <WorkspaceGuard>
-            <ClientStaff />
+            <PlanFeatureGuard feature="staff_accounts">
+              <ClientStaff />
+            </PlanFeatureGuard>
           </WorkspaceGuard>
         );
       case "client_tickets":
@@ -271,7 +364,9 @@ const AppContent: React.FC = () => {
       case "client_ai_analytics":
         return (
           <WorkspaceGuard>
-            <ClientAIEngagement />
+            <PlanFeatureGuard feature="analytics">
+              <ClientAIEngagement />
+            </PlanFeatureGuard>
           </WorkspaceGuard>
         );
       case "client_marketing_agent":
