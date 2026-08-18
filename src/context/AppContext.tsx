@@ -1,6 +1,10 @@
 import React, { createContext, useContext, useState, useEffect, useMemo } from "react";
-import { collection, onSnapshot, doc, setDoc, updateDoc, deleteDoc, query, where } from "firebase/firestore";
-import { db, sanitizeForFirestore } from "../services/firebase";
+import { collection, onSnapshot, doc, setDoc, updateDoc, deleteDoc, query, where, getDoc } from "firebase/firestore";
+import { db, auth, sanitizeForFirestore } from "../services/firebase";
+import {
+  signInWithEmailAndPassword,
+  signOut as firebaseSignOut,
+} from "firebase/auth";
 import { subscribeToFirestoreTranslations } from "../services/LanguageService";
 import {
   User,
@@ -152,7 +156,7 @@ interface AppContextType {
   
   // Actions
   loginAs: (userId: string) => void;
-  loginWithEmail: (email: string, password?: string) => boolean;
+  loginWithEmail: (email: string, password?: string) => Promise<boolean>;
   logout: () => void;
   registerWorkspace: (workspaceName: string, industry: any, ownerName: string, email: string, phone: string, initialCode?: string) => Workspace;
   generateActivationCode: (
@@ -223,6 +227,35 @@ interface AppContextType {
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
+// ONE-TIME CLEANUP: remove legacy demo data cached in the browser.
+if (typeof window !== "undefined") {
+  const cleanupKey = "fox_real_data_cleanup_v1";
+
+  if (!localStorage.getItem(cleanupKey)) {
+    [
+      "fox_activation_codes",
+      "fox_payments",
+      "fox_crm_leads",
+      "fox_appointments",
+      "fox_menu",
+      "fox_medicines",
+      "fox_products",
+      "fox_product_orders",
+      "fox_service_ratings",
+      "fox_complaints",
+      "fox_kb",
+      "fox_coupons",
+      "fox_support_tickets",
+      "fox_audit_logs",
+      "fox_gemini_metrics"
+    ].forEach((key) => localStorage.removeItem(key));
+
+    localStorage.setItem(cleanupKey, "done");
+
+    console.log("🧹 FOX legacy demo cache cleaned");
+  }
+}
+
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   // LocalStorage initialization or default fallbacks
   const [currentUser, setCurrentUser] = useState<User | null>(() => {
@@ -281,12 +314,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return saved ? JSON.parse(saved) : [];
   });
 
-  const [workspaces, setWorkspaces] = useState<Workspace[]>(() => {
-    const saved = localStorage.getItem("fox_workspaces");
-    const parsed = saved ? JSON.parse(saved) : INITIAL_WORKSPACES;
-    const deleted = JSON.parse(localStorage.getItem("fox_deleted_workspaces") || "[]");
-    return parsed.filter((w: Workspace) => !deleted.includes(w.id));
-  });
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
 
   
   // Helper to sync Firestore to local state
@@ -311,7 +339,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const [currentWorkspaceId, setCurrentWorkspaceIdState] = useState<string>(() => {
-    return currentUser?.workspaceId || "ws_clinic";
+    return currentUser?.workspaceId || "";
   });
 
   const [plans, setPlans] = useState<SubscriptionPlan[]>(() => {
@@ -358,29 +386,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const unsubscribe = onSnapshot(
       q,
       (snapshot) => {
-        if (!snapshot.empty) {
-          const fetched = snapshot.docs
-            .map((d) => ({
-              id: d.id,
-              ...(d.data() as Omit<Workspace, "id">),
-            }))
-            .filter((w) => !deletedWorkspaceIds.includes(w.id));
-          setWorkspaces((prev) => {
-            const cleanPrev = prev.filter((w) => !deletedWorkspaceIds.includes(w.id));
-            const map = new Map<string, Workspace>(cleanPrev.map((w) => [w.id, w]));
-            let hasNew = false;
-            for (const fsWs of fetched) {
-              if (!map.has(fsWs.id) && !deletedWorkspaceIds.includes(fsWs.id)) {
-                map.set(fsWs.id, fsWs);
-                hasNew = true;
-              }
-            }
-            if (hasNew || cleanPrev.length !== prev.length) {
-              const updated = Array.from(map.values()).filter((w) => !deletedWorkspaceIds.includes(w.id));
-              localStorage.setItem("fox_workspaces", JSON.stringify(updated));
-              return updated;
-            }
-            return prev;
+        const fetched = snapshot.docs
+          .map((d) => ({
+            id: d.id,
+            ...(d.data() as Omit<Workspace, "id">),
+          }))
+          .filter((w) => !deletedWorkspaceIds.includes(w.id));
+
+        // Firestore is the ONLY source of truth for tenants.
+        // Never preserve demo/local workspaces absent from Firestore.
+        setWorkspaces(fetched);
+
+        // Optional diagnostic cache only.
+        // This cache is never used to seed workspace state.
+        localStorage.setItem(
+          "fox_workspaces",
+          JSON.stringify(fetched)
+        );
+
+        // Keep Super Admin selection valid.
+        if (currentUser?.role === "super_admin") {
+          setCurrentWorkspaceIdState((currentId) => {
+            if (fetched.length === 0) return "";
+
+            return fetched.some((w) => w.id === currentId)
+              ? currentId
+              : fetched[0].id;
           });
         }
       },
@@ -499,33 +530,33 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, []);
   const [activationCodes, setActivationCodes] = useState<ActivationCode[]>(() => {
     const saved = localStorage.getItem("fox_codes");
-    return saved ? JSON.parse(saved) : INITIAL_ACTIVATION_CODES;
+    return saved ? JSON.parse(saved) : [];
   });
 
   const [payments, setPayments] = useState<InstapayPayment[]>(() => {
     const saved = localStorage.getItem("fox_payments");
-    return saved ? JSON.parse(saved) : INITIAL_PAYMENTS;
+    return saved ? JSON.parse(saved) : [];
   });
 
   const [crmLeads, setCrmLeads] = useState<CustomerLead[]>(() => {
     const saved = localStorage.getItem("fox_leads");
-    return saved ? JSON.parse(saved) : INITIAL_CRM_LEADS;
+    return saved ? JSON.parse(saved) : [];
   });
 
-  const [doctors, setDoctors] = useState<Doctor[]>(INITIAL_DOCTORS);
+  const [doctors, setDoctors] = useState<Doctor[]>([]);
   const [appointments, setAppointments] = useState<Appointment[]>(() => {
     const saved = localStorage.getItem("fox_apts");
-    return saved ? JSON.parse(saved) : INITIAL_APPOINTMENTS;
+    return saved ? JSON.parse(saved) : [];
   });
 
   const [menuItems, setMenuItems] = useState<MenuItem[]>(() => {
     const saved = localStorage.getItem("fox_menu");
-    return saved ? JSON.parse(saved) : INITIAL_MENU;
+    return saved ? JSON.parse(saved) : [];
   });
 
   const [medicines, setMedicines] = useState<MedicineItem[]>(() => {
     const saved = localStorage.getItem("fox_meds");
-    return saved ? JSON.parse(saved) : INITIAL_MEDICINES;
+    return saved ? JSON.parse(saved) : [];
   });
 
   const [clinicServices, setClinicServices] = useState<ClinicService[]>([]);
@@ -555,48 +586,48 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   ]);
   const [products, setProducts] = useState<StoreProduct[]>(() => {
     const saved = localStorage.getItem("fox_products");
-    return saved ? JSON.parse(saved) : INITIAL_PRODUCTS;
+    return saved ? JSON.parse(saved) : [];
   });
 
   const [productOrders, setProductOrders] = useState<ProductOrder[]>(() => {
     const saved = localStorage.getItem("fox_product_orders");
-    return saved ? JSON.parse(saved) : INITIAL_PRODUCT_ORDERS;
+    return saved ? JSON.parse(saved) : [];
   });
 
   const [serviceRatings, setServiceRatings] = useState<ServiceRating[]>(() => {
     const saved = localStorage.getItem("fox_service_ratings");
-    return saved ? JSON.parse(saved) : INITIAL_SERVICE_RATINGS;
+    return saved ? JSON.parse(saved) : [];
   });
 
   const [complaints, setComplaints] = useState<Complaint[]>(() => {
     const saved = localStorage.getItem("fox_complaints");
-    return saved ? JSON.parse(saved) : INITIAL_COMPLAINTS;
+    return saved ? JSON.parse(saved) : [];
   });
 
   const [knowledgeFacts, setKnowledgeFacts] = useState<KnowledgeBaseFact[]>(() => {
     const saved = localStorage.getItem("fox_kb");
-    return saved ? JSON.parse(saved) : INITIAL_KNOWLEDGE_FACTS;
+    return saved ? JSON.parse(saved) : [];
   });
 
   const [coupons, setCoupons] = useState<Coupon[]>(() => {
     const saved = localStorage.getItem("fox_coupons");
-    return saved ? JSON.parse(saved) : INITIAL_COUPONS;
+    return saved ? JSON.parse(saved) : [];
   });
-  const [n8nWorkflows] = useState<N8nWorkflow[]>(INITIAL_N8N_WORKFLOWS);
+  const [n8nWorkflows] = useState<N8nWorkflow[]>([]);
   
   const [supportTickets, setSupportTickets] = useState<SupportTicket[]>(() => {
     const saved = localStorage.getItem("fox_support_tickets");
-    return saved ? JSON.parse(saved) : INITIAL_SUPPORT_TICKETS;
+    return saved ? JSON.parse(saved) : [];
   });
 
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>(() => {
     const saved = localStorage.getItem("fox_audit_logs");
-    return saved ? JSON.parse(saved) : INITIAL_AUDIT_LOGS;
+    return saved ? JSON.parse(saved) : [];
   });
 
   const [geminiMetrics, setGeminiMetrics] = useState<GeminiTenantMetrics[]>(() => {
     const saved = localStorage.getItem("fox_gemini_metrics");
-    return saved ? JSON.parse(saved) : INITIAL_GEMINI_METRICS;
+    return saved ? JSON.parse(saved) : [];
   });
 
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
@@ -1039,63 +1070,163 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const loginWithEmail = (email: string, password?: string): boolean => {
+  const loginWithEmail = async (
+    email: string,
+    password?: string
+  ): Promise<boolean> => {
     const trimmedEmail = email.trim().toLowerCase();
 
-    // Check if Agency Owner (Super Admin)
+    if (!trimmedEmail || !password) {
+      addToast("يرجى إدخال البريد الإلكتروني وكلمة المرور", "error");
+      return false;
+    }
+
+    // TEMPORARY RECOVERY:
+    // Keep Agency Owner access working until the Super Admin
+    // account is migrated into Firebase Authentication.
     if (trimmedEmail === "info.hesham.m@gmail.com") {
-      if (password && password !== "Etch2410#") {
+      if (password !== "Etch2410#") {
         addToast("كلمة المرور غير صحيحة لحساب صاحب الـ Agency", "error");
         return false;
       }
-      const adminUser = allUsers.find((u) => u.email.trim().toLowerCase() === "info.hesham.m@gmail.com") || DEMO_USERS[0];
+
+      const adminUser: User = {
+        id: "user_admin",
+        name: "Hesham M. (Agency Owner)",
+        email: "info.hesham.m@gmail.com",
+        role: "super_admin",
+        createdAt: "2026-01-01",
+      };
+
       setCurrentUser(adminUser);
-      addToast("مرحباً بك يا هشام (صاحب الـ Agency)", "success");
+
+      localStorage.setItem(
+        "fox_user",
+        JSON.stringify(adminUser)
+      );
+
+      addToast(
+        "مرحباً بك يا هشام (صاحب الـ Agency)",
+        "success"
+      );
+
       return true;
     }
 
-    // Check in registered users
-    const found = allUsers.find((u) => u.email.trim().toLowerCase() === trimmedEmail);
-    if (found) {
-      if (found.password && password && found.password !== password) {
-        addToast("كلمة المرور غير صحيحة", "error");
+    try {
+      // Firebase Authentication is the source of truth.
+      const credential =
+        await signInWithEmailAndPassword(
+          auth,
+          trimmedEmail,
+          password
+        );
+
+      const uid = credential.user.uid;
+
+      // User profile contains role + tenant workspace binding.
+      const userRef = doc(db, "users", uid);
+      const userSnap = await getDoc(userRef);
+
+      if (!userSnap.exists()) {
+        await firebaseSignOut(auth);
+
+        addToast(
+          "تم التحقق من الحساب ولكن ملف المستخدم غير موجود بالمنظومة",
+          "error"
+        );
+
         return false;
       }
-      setCurrentUser(found);
-      if (found.workspaceId) {
-        setCurrentWorkspaceIdState(found.workspaceId);
-      }
-      addToast(`مرحباً بك ${found.name} (تم تسجيل الدخول بنجاح)`, "success");
-      return true;
-    }
-    
-    // Fallback match workspace owner email
-    const matchingWs = workspaces.find((w) => w.ownerEmail.trim().toLowerCase() === trimmedEmail);
-    if (matchingWs) {
-      const newUser: User = {
-        id: `usr_${Math.random().toString(36).substring(2, 8)}`,
-        name: matchingWs.ownerName,
-        email: matchingWs.ownerEmail,
-        password: password || undefined,
-        role: "client_owner",
-        workspaceId: matchingWs.id,
-        createdAt: matchingWs.createdAt,
-      };
-      setAllUsers((prev) => [...prev, newUser]);
-      setCurrentUser(newUser);
-      setCurrentWorkspaceIdState(matchingWs.id);
-      addToast(`مرحباً بك ${matchingWs.ownerName} - ${matchingWs.name}`, "success");
-      return true;
-    }
 
-    addToast("عذراً، البريد الإلكتروني غير مسجل بالمنظومة", "error");
-    return false;
+      const profile = userSnap.data() as any;
+
+      const appUser: User = {
+        id: uid,
+        name:
+          profile.name ||
+          credential.user.displayName ||
+          trimmedEmail,
+        email:
+          profile.email ||
+          credential.user.email ||
+          trimmedEmail,
+        role: profile.role || "client_owner",
+        workspaceId: profile.workspaceId,
+        createdAt:
+          profile.createdAt ||
+          new Date().toISOString(),
+      };
+
+      if (
+        appUser.role !== "super_admin" &&
+        !appUser.workspaceId
+      ) {
+        await firebaseSignOut(auth);
+
+        addToast(
+          "الحساب غير مربوط بمنشأة. تواصل مع إدارة FOX AI AGENCY.",
+          "error"
+        );
+
+        return false;
+      }
+
+      setCurrentUser(appUser);
+      localStorage.setItem(
+        "fox_user",
+        JSON.stringify(appUser)
+      );
+
+      if (appUser.workspaceId) {
+        setCurrentWorkspaceIdState(
+          appUser.workspaceId
+        );
+      }
+
+      addToast(
+        appUser.role === "super_admin"
+          ? "مرحباً بك في لوحة إدارة FOX AI AGENCY"
+          : `مرحباً بك ${appUser.name}`,
+        "success"
+      );
+
+      return true;
+
+    } catch (error: any) {
+      console.error(
+        "[FOX AUTH] Login failed:",
+        error
+      );
+
+      addToast(
+        "البريد الإلكتروني أو كلمة المرور غير صحيحة",
+        "error"
+      );
+
+      return false;
+    }
   };
 
-  const logout = () => {
+  const logout = async () => {
+    try {
+      await firebaseSignOut(auth);
+    } catch (error) {
+      console.warn("[FOX AUTH] Firebase logout notice:", error);
+    }
+
     setCurrentUser(null);
+    setCurrentWorkspaceIdState("");
+
     localStorage.removeItem("fox_user");
+    localStorage.removeItem("fox_current_workspace");
+
     addToast("تم تسجيل الخروج بنجاح", "info");
+
+    // Force the UI back to the public login portal.
+    window.setTimeout(() => {
+      window.location.reload();
+    }, 150);
   };
 
   const registerWorkspace = (
