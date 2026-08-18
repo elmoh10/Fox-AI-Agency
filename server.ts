@@ -2,6 +2,11 @@ import {
   canWorkspaceUseFeature,
   FoxFeature,
 } from "./src/services/entitlementService";
+
+import {
+  adminAuth,
+  adminDb,
+} from "./src/services/firebaseAdmin";
 import express from "express";
 import path from "path";
 import dotenv from "dotenv";
@@ -819,7 +824,10 @@ app.post("/api/ai/extract-knowledge", async (req, res) => {
 
 
 
-app.post("/api/ai/chat", async (req, res) => {
+app.post(
+  "/api/ai/chat",
+  authenticateFirebaseRequest,
+  async (req: any, res) => {
   try {
     const {
       workspace,
@@ -857,17 +865,14 @@ app.post("/api/ai/chat", async (req, res) => {
     }
 
     const trustedWorkspace =
-      resolveTrustedWorkspace(requestedWorkspaceId);
-
-    if (!trustedWorkspace) {
-      console.warn(
-        `🚫 [FOX Security] Unknown workspace attempted AI access | Workspace=${requestedWorkspaceId}`
+      requireAuthenticatedWorkspace(
+        req,
+        res,
+        requestedWorkspaceId
       );
 
-      return res.status(404).json({
-        error: "Workspace not found",
-        code: "WORKSPACE_NOT_FOUND"
-      });
+    if (!trustedWorkspace) {
+      return;
     }
 
     // Channel entitlement must be enforced server-side.
@@ -923,7 +928,8 @@ app.post("/api/ai/chat", async (req, res) => {
         "Failed to process AI response"
     });
   }
-});
+  }
+);
 
 const FALLBACK_MODELS = [
   "gemini-3.6-flash",
@@ -2314,6 +2320,225 @@ async function callWorkspaceTelegramApi(
  * a browser request. The registered server workspace is the
  * source of truth.
  */
+
+// ==========================================================
+// FIREBASE API AUTHENTICATION
+// ==========================================================
+
+type FoxAuthenticatedRequest = any;
+
+async function authenticateFirebaseRequest(
+  req: FoxAuthenticatedRequest,
+  res: any,
+  next: any
+) {
+  try {
+    const authorization =
+      String(
+        req.headers?.authorization || ""
+      ).trim();
+
+    if (
+      !authorization.startsWith(
+        "Bearer "
+      )
+    ) {
+      return res.status(401).json({
+        success: false,
+        code: "AUTH_TOKEN_REQUIRED",
+        error:
+          "Firebase authentication token is required",
+      });
+    }
+
+    const idToken =
+      authorization
+        .slice("Bearer ".length)
+        .trim();
+
+    if (!idToken) {
+      return res.status(401).json({
+        success: false,
+        code: "AUTH_TOKEN_REQUIRED",
+        error:
+          "Firebase authentication token is required",
+      });
+    }
+
+    // Verify token signature, expiration and project.
+    const decoded =
+      await adminAuth.verifyIdToken(
+        idToken
+      );
+
+    const uid = decoded.uid;
+
+    // Profile is authoritative for FOX role/workspace binding.
+    const profileSnapshot =
+      await adminDb
+        .collection("users")
+        .doc(uid)
+        .get();
+
+    if (!profileSnapshot.exists) {
+      console.warn(
+        `🚫 [FOX Auth] Profile missing | UID=${uid}`
+      );
+
+      return res.status(403).json({
+        success: false,
+        code: "FOX_USER_PROFILE_MISSING",
+        error:
+          "FOX user profile was not found",
+      });
+    }
+
+    const profile: any =
+      profileSnapshot.data() || {};
+
+    if (
+      profile.role !== "super_admin" &&
+      profile.role !== "client_owner" &&
+      profile.role !== "staff"
+    ) {
+      return res.status(403).json({
+        success: false,
+        code: "INVALID_USER_ROLE",
+        error:
+          "User role is not authorized",
+      });
+    }
+
+    req.foxAuth = {
+      uid,
+      email:
+        decoded.email ||
+        profile.email ||
+        null,
+      role: profile.role,
+      workspaceId:
+        profile.workspaceId || null,
+      profile,
+    };
+
+    console.log(
+      `🔐 [FOX Auth] Verified | UID=${uid} | Role=${profile.role} | Workspace=${profile.workspaceId || "AGENCY"}`
+    );
+
+    return next();
+
+  } catch (error: any) {
+    console.warn(
+      "[FOX Auth] Token verification failed:",
+      error?.code ||
+        error?.message ||
+        error
+    );
+
+    return res.status(401).json({
+      success: false,
+      code: "INVALID_AUTH_TOKEN",
+      error:
+        "Authentication token is invalid or expired",
+    });
+  }
+}
+
+
+/**
+ * Validates that a logged-in tenant can act only on its own
+ * workspace. Super Admin can access every workspace.
+ */
+function requireAuthenticatedWorkspace(
+  req: FoxAuthenticatedRequest,
+  res: any,
+  requestedWorkspaceId: string
+) {
+  const auth = req.foxAuth;
+
+  if (!auth) {
+    res.status(401).json({
+      success: false,
+      code: "NOT_AUTHENTICATED",
+      error: "Authentication required",
+    });
+
+    return null;
+  }
+
+  const workspaceId =
+    String(
+      requestedWorkspaceId || ""
+    ).trim();
+
+  if (!workspaceId) {
+    res.status(400).json({
+      success: false,
+      code: "WORKSPACE_ID_REQUIRED",
+      error: "workspaceId is required",
+    });
+
+    return null;
+  }
+
+  // Agency owner can manage all tenants.
+  if (auth.role === "super_admin") {
+    const workspace =
+      resolveTrustedWorkspace(
+        workspaceId
+      );
+
+    if (!workspace) {
+      res.status(404).json({
+        success: false,
+        code: "WORKSPACE_NOT_FOUND",
+        error: "Workspace not found",
+      });
+
+      return null;
+    }
+
+    return workspace;
+  }
+
+  // Client/staff accounts are locked to their Firebase profile.
+  if (
+    String(auth.workspaceId) !==
+    workspaceId
+  ) {
+    console.warn(
+      `🚨 [FOX Security] Cross-tenant request blocked | UID=${auth.uid} | UserWorkspace=${auth.workspaceId} | RequestedWorkspace=${workspaceId}`
+    );
+
+    res.status(403).json({
+      success: false,
+      code:
+        "CROSS_TENANT_ACCESS_BLOCKED",
+      error:
+        "You cannot access another workspace",
+    });
+
+    return null;
+  }
+
+  const workspace =
+    resolveTrustedWorkspace(
+      workspaceId
+    );
+
+  if (!workspace) {
+    res.status(404).json({
+      success: false,
+      code: "WORKSPACE_NOT_FOUND",
+      error: "Workspace not found",
+    });
+
+    return null;
+  }
+
+  return workspace;
+}
+
 function requireWorkspaceFeature(
   workspace: any,
   feature: FoxFeature
@@ -3386,66 +3611,208 @@ app.post("/api/telegram/bot", async (req, res) => {
 
 // n8n Webhook Simulation & Proxy Endpoint
 app.post("/api/n8n/webhook", async (req, res) => {
-  const { event, payload, customWebhookUrl } = req.body;
-  const startTime = Date.now();
+  try {
+    const {
+      event,
+      payload,
+      customWebhookUrl,
+      workspaceId: bodyWorkspaceId,
+    } = req.body || {};
 
-  if (customWebhookUrl && typeof customWebhookUrl === "string" && customWebhookUrl.startsWith("http")) {
-    try {
-      const response = await fetch(customWebhookUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload || { event: event || "test_trigger" }),
-      });
-      const durationMs = Date.now() - startTime;
-      let data;
-      try {
-        data = await response.json();
-      } catch {
-        data = await response.text();
-      }
-      return res.json({
-        status: response.ok ? "success" : "error",
-        statusCode: response.status,
-        durationMs,
-        customWebhookUrl,
-        event: event || "test_trigger",
-        executionId: `exec_${Math.random().toString(36).substring(2, 9)}`,
-        timestamp: new Date().toISOString(),
-        responseData: data,
-        message: response.ok
-          ? `External n8n Webhook triggered successfully! (HTTP ${response.status})`
-          : `External n8n Webhook returned HTTP ${response.status}`,
-      });
-    } catch (err: any) {
-      return res.status(500).json({
+    const startTime = Date.now();
+
+    // ========================================================
+    // FOX SECURITY:
+    // n8n is an Enterprise-only tenant integration.
+    // Never trust planId or entitlement data from the request.
+    // ========================================================
+
+    const requestedWorkspaceId = String(
+      bodyWorkspaceId ||
+      payload?.workspaceId ||
+      ""
+    ).trim();
+
+    if (!requestedWorkspaceId) {
+      return res.status(400).json({
+        success: false,
         status: "failed",
-        statusCode: 500,
-        durationMs: Date.now() - startTime,
-        error: err.message || "Failed to reach external n8n webhook URL",
-        timestamp: new Date().toISOString(),
+        code: "WORKSPACE_ID_REQUIRED",
+        error: "workspaceId is required",
       });
     }
-  }
 
-  // Default simulated n8n internal trigger
-  console.log(`[n8n Webhook Triggered]: Event=${event}`, payload);
-  return res.json({
-    status: "success",
-    statusCode: 200,
-    durationMs: Math.floor(Math.random() * 40) + 15,
-    event: event || "test_trigger",
-    executionId: `exec_${Math.random().toString(36).substring(2, 9)}`,
-    timestamp: new Date().toISOString(),
-    responseData: {
-      received: true,
-      event: event || "test_trigger",
-      workspaceId: payload?.workspaceId,
-      processedBy: "FOX AI Agency n8n Integration Hub",
-      syncedToSheet: true,
-      dataEcho: payload || {},
-    },
-    message: `n8n workflow executed successfully for event: ${event || "test_trigger"}`,
-  });
+    const trustedWorkspace =
+      resolveTrustedWorkspace(requestedWorkspaceId);
+
+    if (!trustedWorkspace) {
+      console.warn(
+        `🚫 [FOX n8n] Unknown workspace | Workspace=${requestedWorkspaceId}`
+      );
+
+      return res.status(404).json({
+        success: false,
+        status: "failed",
+        code: "WORKSPACE_NOT_FOUND",
+        error: "Workspace not found",
+      });
+    }
+
+    const access =
+      requireWorkspaceFeature(
+        trustedWorkspace,
+        "n8n"
+      );
+
+    if (!access.allowed) {
+      console.warn(
+        `🔒 [FOX n8n] Blocked | Workspace=${trustedWorkspace.id} | Plan=${trustedWorkspace.planId}`
+      );
+
+      return res.status(access.status).json({
+        success: false,
+        status: "blocked",
+        ...access,
+      });
+    }
+
+    console.log(
+      `🔓 [FOX n8n] Allowed | Workspace=${trustedWorkspace.id} | Plan=${trustedWorkspace.planId} | Event=${event || "test_trigger"}`
+    );
+
+    // ========================================================
+    // External n8n webhook
+    // ========================================================
+
+    if (
+      customWebhookUrl &&
+      typeof customWebhookUrl === "string" &&
+      customWebhookUrl.startsWith("http")
+    ) {
+      try {
+        const response = await fetch(
+          customWebhookUrl,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              ...(payload || {}),
+              workspaceId: trustedWorkspace.id,
+              event: event || "test_trigger",
+            }),
+          }
+        );
+
+        const durationMs =
+          Date.now() - startTime;
+
+        let data;
+
+        try {
+          data = await response.json();
+        } catch {
+          data = await response.text();
+        }
+
+        return res.json({
+          success: response.ok,
+          status:
+            response.ok
+              ? "success"
+              : "error",
+          statusCode: response.status,
+          durationMs,
+          workspaceId:
+            trustedWorkspace.id,
+          event:
+            event || "test_trigger",
+          executionId:
+            `exec_${Math.random()
+              .toString(36)
+              .substring(2, 9)}`,
+          timestamp:
+            new Date().toISOString(),
+          responseData: data,
+          message: response.ok
+            ? `External n8n Webhook triggered successfully! (HTTP ${response.status})`
+            : `External n8n Webhook returned HTTP ${response.status}`,
+        });
+
+      } catch (err: any) {
+        return res.status(500).json({
+          success: false,
+          status: "failed",
+          statusCode: 500,
+          durationMs:
+            Date.now() - startTime,
+          workspaceId:
+            trustedWorkspace.id,
+          error:
+            err.message ||
+            "Failed to reach external n8n webhook URL",
+          timestamp:
+            new Date().toISOString(),
+        });
+      }
+    }
+
+    // ========================================================
+    // Internal n8n simulation
+    // ========================================================
+
+    console.log(
+      `[n8n Webhook Triggered] Workspace=${trustedWorkspace.id} | Event=${event || "test_trigger"}`
+    );
+
+    return res.json({
+      success: true,
+      status: "success",
+      statusCode: 200,
+      durationMs:
+        Math.floor(
+          Math.random() * 40
+        ) + 15,
+      workspaceId:
+        trustedWorkspace.id,
+      event:
+        event || "test_trigger",
+      executionId:
+        `exec_${Math.random()
+          .toString(36)
+          .substring(2, 9)}`,
+      timestamp:
+        new Date().toISOString(),
+      responseData: {
+        received: true,
+        event:
+          event || "test_trigger",
+        workspaceId:
+          trustedWorkspace.id,
+        processedBy:
+          "FOX AI Agency n8n Integration Hub",
+        dataEcho:
+          payload || {},
+      },
+      message:
+        `n8n workflow executed successfully for event: ${event || "test_trigger"}`,
+    });
+
+  } catch (err: any) {
+    console.error(
+      "[FOX n8n Endpoint Error]:",
+      err
+    );
+
+    return res.status(500).json({
+      success: false,
+      status: "failed",
+      error:
+        err.message ||
+        "n8n request failed",
+    });
+  }
 });
 
 // Vite Middleware for Development / Static serving for Production

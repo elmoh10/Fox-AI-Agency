@@ -23,6 +23,7 @@ import {
   Terminal,
   ShieldCheck,
 } from "lucide-react";
+import { authenticatedFetch } from "../../services/authenticatedFetch";
 
 export const ClientAISettings: React.FC = () => {
   const {
@@ -254,9 +255,8 @@ export const ClientAISettings: React.FC = () => {
     setTestingAi(true);
 
     try {
-      const res = await fetch("/api/ai/chat", {
+      const res = await authenticatedFetch("/api/ai/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           workspace: prepareWorkspaceContextPayload(),
           customerMessage: input,
