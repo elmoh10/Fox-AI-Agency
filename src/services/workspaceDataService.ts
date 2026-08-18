@@ -56,6 +56,14 @@ export const workspaceDataService = {
       phoneNormalized: normalizePhone(data.phone),
       date: data.date,
       time: data.time,
+
+      // Dashboard-compatible fields
+      patientName: data.customerName,
+      patientPhone: data.phone,
+      timeSlot: data.time,
+      doctorName: "AI Booking",
+      specialty: "General",
+
       channel: data.channel || "telegram",
       sessionId: data.sessionId,
       status: "Scheduled",

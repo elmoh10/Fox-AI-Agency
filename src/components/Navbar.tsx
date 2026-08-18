@@ -105,7 +105,8 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenLoginModal, onStartTour })
                 {/* Super Admin option */}
                 <button
                   onClick={() => {
-                    setCurrentWorkspaceId("ws_clinic");
+                    // Agency Admin view must not depend on a fake/demo workspace.
+                    // Keep the currently selected real workspace context.
                     setWorkspaceMenuOpen(false);
                   }}
                   className="w-full flex items-center justify-between gap-2 rounded-xl px-3 py-2 text-start text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-orange-600/10 hover:text-orange-500 transition"
@@ -143,7 +144,7 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenLoginModal, onStartTour })
                     <div className="truncate">
                       <p className="truncate font-semibold">{ws.name}</p>
                       <p className="text-[10px] text-slate-400 font-normal">
-                        {ws.industry} • {ws.planId.toUpperCase()}
+                        {ws.industry || (isAr ? "نشاط غير محدد" : "Unknown Industry")} • {(ws.planId || "unknown").toUpperCase()}
                       </p>
                     </div>
                     {ws.status === "active" && (

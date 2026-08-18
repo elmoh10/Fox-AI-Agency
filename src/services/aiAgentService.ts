@@ -896,7 +896,7 @@ ${industryContext || "Standard business inquiry catalog."}
         // Example: 19 الشهر ده
         const thisMonthMatch =
           modifyMessage.match(
-            /(\d{1,2})\s*(?:الشهر\s*ده|هذا\s*الشهر)/i
+            /(\d{1,2})\s*(?:من\s*)?(?:الشهر\s*ده|هذا\s*الشهر)/i
           );
 
         if (thisMonthMatch) {
@@ -1584,6 +1584,158 @@ ${industryContext || "Standard business inquiry catalog."}
             messageLang === "ar"
               ? ["حجز موعد جديد", "تعديل موعد"]
               : ["Book New Appointment", "Modify Appointment"]
+        };
+      }
+    }
+
+    // =========================================================
+    // DETERMINISTIC BOOKING DATE/TIME COLLECTION
+    // Booking order:
+    // intent -> date/time -> fresh name/phone -> Firestore booking
+    // =========================================================
+    if (workspace?.id && params.sessionId) {
+      const bookingFlowCtx =
+        await sharedMemoryService.getContext(
+          workspace.id,
+          params.sessionId
+        );
+
+      const bookingFlowMessage =
+        String(message || "").trim();
+
+      const bookingFlowIntent =
+        /(عاوز\s*احجز|عاوز\s*أحجز|عايز\s*احجز|عايز\s*أحجز|أريد\s*حجز|اريد\s*حجز|احجز|أحجز|book\s+an?\s*appointment|book\s+appointment|reserve)/i.test(
+          bookingFlowMessage
+        );
+
+      const explicitDate =
+        /(\d{1,2})\s+(يناير|فبراير|مارس|أبريل|ابريل|مايو|يونيو|يوليو|أغسطس|اغسطس|سبتمبر|أكتوبر|اكتوبر|نوفمبر|ديسمبر)|(\d{4}-\d{2}-\d{2})|بكره|بكرة|غدا|غداً/i.test(
+          bookingFlowMessage
+        );
+
+      const explicitTime =
+        /الساعة\s*\d{1,2}|(\d{1,2}):(\d{2})\s*(AM|PM)|\d{1,2}\s*(صباح|ظهر|مساء)/i.test(
+          bookingFlowMessage
+        );
+
+      const lastBookingBot =
+        bookingFlowCtx.messages
+          .slice()
+          .reverse()
+          .find((m) => m.sender === "bot")
+          ?.text || "";
+
+      // -------------------------------------------------------
+      // STEP 1: Generic booking request without date/time
+      // -------------------------------------------------------
+      if (
+        bookingFlowIntent &&
+        (!explicitDate || !explicitTime)
+      ) {
+        await sharedMemoryService.appendMessage(
+          workspace.id,
+          params.sessionId,
+          {
+            sender: "user",
+            text: message,
+            time: new Date().toISOString(),
+            agentRole: "Sales"
+          }
+        );
+
+        const reply =
+          messageLang === "ar"
+            ? "تمام ✅ قولي التاريخ والوقت اللي تحب تحجز فيهم.\n\nمثال: 25 أغسطس الساعة 3 مساءً"
+            : "Sure ✅ Please send your preferred appointment date and time.";
+
+        await sharedMemoryService.appendMessage(
+          workspace.id,
+          params.sessionId,
+          {
+            sender: "bot",
+            text: reply + "\nBOOKING_STATE:WAIT_DATETIME",
+            time: new Date().toISOString(),
+            agentRole: "Sales"
+          }
+        );
+
+        console.log(
+          `📅 [FOX Booking] Waiting for appointment date/time | Workspace=${workspace.id}`
+        );
+
+        return {
+          response: reply,
+          aiResponse: reply,
+          detectedLanguage: messageLang,
+          source: "fox_booking_datetime_guard",
+          suggestedActions: []
+        };
+      }
+
+      // -------------------------------------------------------
+      // STEP 2: Date/time supplied after generic booking request
+      // Save a synthetic complete booking request in memory.
+      // This lets the existing deterministic booking parser use
+      // the correct date/time later after name + phone arrive.
+      // -------------------------------------------------------
+      if (
+        lastBookingBot.includes("BOOKING_STATE:WAIT_DATETIME")
+      ) {
+        if (!explicitDate || !explicitTime) {
+          const reply =
+            messageLang === "ar"
+              ? "محتاج التاريخ والوقت مع بعض، مثلاً: 25 أغسطس الساعة 3 مساءً."
+              : "Please send both the appointment date and time.";
+
+          return {
+            response: reply,
+            aiResponse: reply,
+            detectedLanguage: messageLang,
+            source: "fox_booking_datetime_guard",
+            suggestedActions: []
+          };
+        }
+
+        const completeBookingRequest =
+          `عاوز أحجز موعد ${bookingFlowMessage}`;
+
+        await sharedMemoryService.appendMessage(
+          workspace.id,
+          params.sessionId,
+          {
+            sender: "user",
+            text: completeBookingRequest,
+            time: new Date().toISOString(),
+            agentRole: "Sales"
+          }
+        );
+
+        const reply =
+          messageLang === "ar"
+            ? "تمام ✅ قبل تأكيد الحجز، ابعتلي **اسم صاحب الحجز ورقم الموبايل** المستخدم في الحجز."
+            : "Great ✅ Before confirming the booking, please send the customer name and phone number.";
+
+        await sharedMemoryService.appendMessage(
+          workspace.id,
+          params.sessionId,
+          {
+            sender: "bot",
+            text: reply,
+            time: new Date().toISOString(),
+            agentRole: "Sales"
+          }
+        );
+
+        console.log(
+          `📝 [FOX Booking] Date/time collected; waiting for fresh customer identity | Workspace=${workspace.id}`
+        );
+
+        return {
+          response: reply,
+          aiResponse: reply,
+          detectedLanguage: messageLang,
+          source: "fox_booking_identity_guard",
+          suggestedActions: []
         };
       }
     }

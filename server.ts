@@ -7,6 +7,8 @@ import { aiAgentService } from "./src/services/aiAgentService";
 import { sharedMemoryService } from "./src/services/sharedMemoryService";
 import { emailService } from "./src/services/emailService";
 import { TrialLimitManager } from "./src/services/TrialLimitManager";
+import { db } from "./src/services/firebase";
+import { collection, getDocs } from "firebase/firestore";
 
 dotenv.config();
 
@@ -960,6 +962,61 @@ let agencyBotConfig = {
 // Registered Clients & Leads Store for Agency Dashboard
 let registeredWorkspacesStore: any[] = [];
 let registeredLeadsStore: any[] = [];
+
+// ==========================================================
+// FIRESTORE WORKSPACE HYDRATION
+// Firestore is the persistent source of truth for tenants.
+// Backend memory is only a runtime cache.
+// ==========================================================
+async function hydrateRegisteredWorkspacesFromFirestore() {
+  try {
+    const snapshot = await getDocs(
+      collection(db, "workspaces")
+    );
+
+    const firestoreWorkspaces = snapshot.docs
+      .map((docSnap) => {
+        const data = docSnap.data() as any;
+
+        return {
+          ...data,
+          id: data?.id || docSnap.id,
+        };
+      })
+      .filter((workspace) => {
+        return (
+          workspace?.id &&
+          workspace.status !== "deleted"
+        );
+      });
+
+    registeredWorkspacesStore =
+      firestoreWorkspaces;
+
+    console.log(
+      `🔥 [Firestore] Loaded ${registeredWorkspacesStore.length} real workspace(s)`
+    );
+
+    for (const workspace of registeredWorkspacesStore) {
+      console.log(
+        `🏢 [Firestore Workspace] ${workspace.id} | ${workspace.name || "Unnamed"} | ${workspace.industry || "Unknown"} | Plan=${workspace.planId || "unknown"}`
+      );
+    }
+
+    return registeredWorkspacesStore;
+  } catch (error) {
+    console.error(
+      "❌ [Firestore] Failed to hydrate workspaces:",
+      error
+    );
+
+    // Important:
+    // Do NOT inject demo workspaces when Firestore fails.
+    registeredWorkspacesStore = [];
+
+    return [];
+  }
+}
 
 // Subscriber Modification Requests Store
 export interface SubscriberModificationRequestStoreItem {
@@ -3224,6 +3281,14 @@ app.post("/api/n8n/webhook", async (req, res) => {
 
 // Vite Middleware for Development / Static serving for Production
 async function startServer() {
+  // --------------------------------------------------------
+  // Persistent tenant startup
+  // --------------------------------------------------------
+  await hydrateRegisteredWorkspacesFromFirestore();
+
+  // Start Telegram workers only AFTER Firestore tenants exist.
+  await syncWorkspaceTelegramBots();
+
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },

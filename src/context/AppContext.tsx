@@ -1528,27 +1528,161 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       workspaceId: targetWsId,
       id: `apt_${Math.random().toString(36).substring(2, 8)}`,
     };
-    setAppointments((prev) => [newApt, ...prev]); setDoc(doc(db, "appointments", newApt.id), newApt).catch(console.error);
+    // Keep dashboard-compatible and backend-compatible fields together.
+    const syncedApt: any = {
+      ...newApt,
+      customerName: newApt.patientName,
+      phone: newApt.patientPhone,
+      time: newApt.timeSlot,
+      updatedAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+    };
+
+    setAppointments((prev) => [newApt, ...prev]);
+
+    // Root collection used by dashboard realtime sync.
+    setDoc(
+      doc(db, "appointments", newApt.id),
+      syncedApt
+    ).catch(console.error);
+
+    // Tenant-isolated source used by FOX AI / Telegram.
+    setDoc(
+      doc(
+        db,
+        "workspaces",
+        targetWsId,
+        "appointments",
+        newApt.id
+      ),
+      syncedApt
+    ).catch((error) => {
+      console.warn(
+        "[FOX CRM] Tenant appointment create sync failed:",
+        error
+      );
+    });
+
     setWorkspaces((prev) =>
-      prev.map((w) => (w.id === targetWsId ? { ...w, totalAppointments: w.totalAppointments + 1 } : w))
+      prev.map((w) =>
+        w.id === targetWsId
+          ? { ...w, totalAppointments: w.totalAppointments + 1 }
+          : w
+      )
     );
+
     addToast("Appointment scheduled!", "success");
   };
 
   const updateAppointment = (id: string, updates: Partial<Appointment>) => {
-    setAppointments((prev) => prev.map((a) => (a.id === id ? { ...a, ...updates } : a)));
-    updateDoc(doc(db, "appointments", id), updates).catch(console.error);
-    addToast("Appointment updated", "success");
-  };
-
-  const updateAppointmentStatus = (aptId: string, status: Appointment["status"]) => {
-    const existing = appointments.find((a) => a.id === aptId);
+    const existing = appointments.find((a) => a.id === id);
     if (!existing) return;
+
     if (!isSuperAdmin && existing.workspaceId !== currentWorkspace?.id) {
       addToast("ليس لديك صلاحية لتعديل بيانات هذا الحساب", "error");
       return;
     }
-    setAppointments((prev) => prev.map((a) => (a.id === aptId ? { ...a, status } : a))); updateDoc(doc(db, "appointments", aptId), { status }).catch(console.error);
+
+    // Keep backend canonical fields compatible with dashboard fields.
+    const syncedUpdates: any = { ...updates };
+
+    if (updates.patientName !== undefined) {
+      syncedUpdates.customerName = updates.patientName;
+    }
+
+    if (updates.patientPhone !== undefined) {
+      syncedUpdates.phone = updates.patientPhone;
+    }
+
+    if (updates.timeSlot !== undefined) {
+      syncedUpdates.time = updates.timeSlot;
+    }
+
+    setAppointments((prev) =>
+      prev.map((a) =>
+        a.id === id ? { ...a, ...updates } : a
+      )
+    );
+
+    // Root collection used by the current dashboard.
+    updateDoc(
+      doc(db, "appointments", id),
+      syncedUpdates
+    ).catch(console.error);
+
+    // Tenant-isolated collection used by FOX AI / Telegram.
+    if (existing.workspaceId) {
+      updateDoc(
+        doc(
+          db,
+          "workspaces",
+          existing.workspaceId,
+          "appointments",
+          id
+        ),
+        syncedUpdates
+      ).catch((error) => {
+        console.warn(
+          "[FOX CRM] Tenant appointment update sync failed:",
+          error
+        );
+      });
+    }
+
+    addToast("Appointment updated", "success");
+  };
+
+  const updateAppointmentStatus = (
+    aptId: string,
+    status: Appointment["status"]
+  ) => {
+    const existing = appointments.find((a) => a.id === aptId);
+    if (!existing) return;
+
+    if (!isSuperAdmin && existing.workspaceId !== currentWorkspace?.id) {
+      addToast("ليس لديك صلاحية لتعديل بيانات هذا الحساب", "error");
+      return;
+    }
+
+    const updates = {
+      status,
+      updatedAt: new Date().toISOString(),
+      ...(status === "Cancelled"
+        ? { cancelledAt: new Date().toISOString() }
+        : {})
+    };
+
+    setAppointments((prev) =>
+      prev.map((a) =>
+        a.id === aptId ? { ...a, status } : a
+      )
+    );
+
+    // Root dashboard collection.
+    updateDoc(
+      doc(db, "appointments", aptId),
+      updates
+    ).catch(console.error);
+
+    // Tenant CRM collection.
+    if (existing.workspaceId) {
+      updateDoc(
+        doc(
+          db,
+          "workspaces",
+          existing.workspaceId,
+          "appointments",
+          aptId
+        ),
+        updates
+      ).catch((error) => {
+        console.warn(
+          "[FOX CRM] Tenant appointment status sync failed:",
+          error
+        );
+      });
+    }
+
     addToast(`Appointment status updated: ${status}`, "info");
   };
 
