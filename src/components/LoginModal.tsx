@@ -44,10 +44,17 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
 
   if (!isOpen) return null;
 
-  const handleLoginSubmit = (e: React.FormEvent) => {
+  const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!loginEmail) return;
-    if (loginWithEmail(loginEmail, loginPassword)) {
+    if (!loginEmail || !loginPassword) return;
+
+    const success =
+      await loginWithEmail(
+        loginEmail,
+        loginPassword
+      );
+
+    if (success) {
       onClose();
     }
   };

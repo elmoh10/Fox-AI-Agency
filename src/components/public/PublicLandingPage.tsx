@@ -79,10 +79,10 @@ export const PublicLandingPage: React.FC<PublicLandingPageProps> = ({ onLoginCli
   const [phone, setPhone] = useState("");
   const [activationCode, setActivationCode] = useState("");
 
-  const handleLoginSubmit = (e: React.FormEvent) => {
+  const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!loginEmail) return;
-    loginWithEmail(loginEmail, loginPassword);
+    if (!loginEmail || !loginPassword) return;
+    await loginWithEmail(loginEmail, loginPassword);
   };
 
   const handleRegisterSubmit = (e: React.FormEvent) => {
