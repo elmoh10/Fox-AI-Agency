@@ -265,14 +265,6 @@ export const ClientAISettings: React.FC = () => {
         }),
       });
       const data = await res.json();
-      
-      // Deduct credit if response was generated and credit is > 0
-      if (currentWorkspace.creditBalance && currentWorkspace.creditBalance > 0 && !data.error) {
-         updateWorkspaceField(currentWorkspace.id, { 
-           creditBalance: currentWorkspace.creditBalance - 1,
-           aiConversationsUsed: (currentWorkspace.aiConversationsUsed || 0) + 1
-         });
-      }
 
       setTestChatLog((prev) => [...prev, { sender: "bot", text: data.aiResponse || data.response }]);
     } catch {

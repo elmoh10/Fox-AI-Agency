@@ -4,6 +4,7 @@ import { checkAvailability, bookAppointmentInSheet } from "./googleSheetsService
 import { workspaceDataService } from "./workspaceDataService";
 import { triggerExternalCRM } from "./crmService";
 import { sharedMemoryService } from "./sharedMemoryService";
+import { creditService } from "./creditService";
 
 export interface AiAgentConfig {
   agentName?: string;
@@ -550,21 +551,156 @@ ${industryContext || "Standard business inquiry catalog."}
     }
   }
 
-  public async generateChatResponse(params: GenerateChatParams): Promise<ChatResponse> {
-    const { workspace } = params;
-    
-    // Check if credit is exhausted
-    if (workspace && typeof workspace.creditBalance === 'number' && workspace.creditBalance <= 0) {
+  // =========================================================
+  // CENTRALIZED FOX AI CREDIT GATE
+  // Every tenant AI request passes through this method.
+  // Firestore is the source of truth for conversation credits.
+  // =========================================================
+  public async generateChatResponse(
+    params: GenerateChatParams
+  ): Promise<ChatResponse> {
+    const workspaceId = params.workspace?.id;
+
+    // Internal/system calls without a tenant workspace are not billed.
+    if (!workspaceId) {
+      return this.generateChatResponseInternal(params);
+    }
+
+    try {
+      const creditCheck =
+        await creditService.canUseAI(workspaceId);
+
+      if (!creditCheck.allowed) {
+        const isEnglish =
+          params.workspace?.aiSettings?.languageMode === "english";
+
+        const responseText = isEnglish
+          ? "Your AI conversation balance has been exhausted. Please purchase an additional conversation package or renew your subscription."
+          : "تم استهلاك رصيد المحادثات الخاص بالمنشأة. يرجى شراء باقة محادثات إضافية أو تجديد الاشتراك لاستمرار خدمة الوكيل الذكي.";
+
+        console.log(
+          `🔴 [FOX Credits] Exhausted | Workspace=${workspaceId} | Plan=${creditCheck.state.planId}`
+        );
+
+        return {
+          response: responseText,
+          aiResponse: responseText,
+          detectedLanguage: isEnglish ? "en" : "ar",
+          source: "fox_credit_guard",
+          suggestedActions: isEnglish
+            ? ["Buy Extra Conversations", "View Subscription"]
+            : ["شراء محادثات إضافية", "عرض الاشتراك"],
+        };
+      }
+
+      console.log(
+        `🟢 [FOX Credits] Allowed | Workspace=${workspaceId} | Plan=${creditCheck.state.planId} | Balance=${
+          creditCheck.state.unlimited
+            ? "UNLIMITED"
+            : creditCheck.state.creditBalance
+        }`
+      );
+
+      // Generate the actual tenant response first.
+      const result =
+        await this.generateChatResponseInternal(params);
+
+      /*
+       * Consume only after a successful response.
+       * If the AI provider throws before returning a result,
+       * the customer is not charged.
+       */
+      try {
+        const usage =
+          await creditService.consumeConversation(
+            workspaceId,
+            {
+              channel: params.channel || "telegram",
+              sessionId: params.sessionId,
+            }
+          );
+
+        console.log(
+          `💳 [FOX Credits] Consumed 1 | Workspace=${workspaceId} | Used=${usage.aiConversationsUsed} | Balance=${
+            usage.unlimited
+              ? "UNLIMITED"
+              : usage.creditBalance
+          }`
+        );
+      } catch (creditError: any) {
+        /*
+         * A concurrent request may have consumed the final credit
+         * after the initial check. In that case do not expose the
+         * generated answer for free.
+         */
+        if (
+          creditError?.message ===
+          "FOX_AI_CREDITS_EXHAUSTED"
+        ) {
+          console.warn(
+            `🟠 [FOX Credits] Final credit consumed concurrently | Workspace=${workspaceId}`
+          );
+
+          const isEnglish =
+            params.workspace?.aiSettings?.languageMode === "english";
+
+          const responseText = isEnglish
+            ? "Your AI conversation balance has just been exhausted. Please purchase an additional conversation package to continue."
+            : "تم استهلاك آخر نقطة من رصيد المحادثات. يرجى شراء باقة محادثات إضافية لاستمرار الخدمة.";
+
+          return {
+            response: responseText,
+            aiResponse: responseText,
+            detectedLanguage: isEnglish ? "en" : "ar",
+            source: "fox_credit_guard",
+            suggestedActions: isEnglish
+              ? ["Buy Extra Conversations"]
+              : ["شراء محادثات إضافية"],
+          };
+        }
+
+        console.error(
+          "[FOX Credits] Usage recording failed:",
+          creditError
+        );
+
+        /*
+         * Don't break a completed customer interaction because
+         * analytics logging failed for an unrelated reason.
+         */
+      }
+
+      return result;
+    } catch (error: any) {
+      console.error(
+        `[FOX Credits] Guard failure | Workspace=${workspaceId}:`,
+        error
+      );
+
+      /*
+       * Fail closed for tenant billing/credit validation.
+       * We must never allow unlimited AI usage if Firestore
+       * credit verification itself is unavailable.
+       */
+      const isEnglish =
+        params.workspace?.aiSettings?.languageMode === "english";
+
+      const responseText = isEnglish
+        ? "The AI service is temporarily unavailable while your subscription balance is being verified. Please try again shortly."
+        : "خدمة الوكيل الذكي غير متاحة مؤقتاً أثناء التحقق من رصيد الاشتراك. يرجى المحاولة مرة أخرى بعد قليل.";
+
       return {
-        response: workspace.aiSettings?.languageMode === 'english' 
-          ? "Service temporarily unavailable (Credit Exhausted). Please contact the business."
-          : "الخدمة غير متاحة حالياً (نفاذ الرصيد). يرجى التواصل مع النشاط التجاري.",
-        aiResponse: workspace.aiSettings?.languageMode === 'english' ? "Service temporarily unavailable" : "الخدمة غير متاحة حالياً",
-        detectedLanguage: workspace.aiSettings?.languageMode === 'english' ? "en" : "ar",
-        source: "system",
-        suggestedActions: []
+        response: responseText,
+        aiResponse: responseText,
+        detectedLanguage: isEnglish ? "en" : "ar",
+        source: "fox_credit_guard_error",
+        suggestedActions: [],
       };
     }
+  }
+
+  private async generateChatResponseInternal(params: GenerateChatParams): Promise<ChatResponse> {
+    const { workspace } = params;
 
     const { message, channel = "telegram", chatHistory = [], overrideConfig } = params;
     
