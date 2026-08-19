@@ -47,6 +47,9 @@ export const ClientWhatsAppQR: React.FC = () => {
 
   const isConnected = serverConnected;
   const [copiedUrl, setCopiedUrl] = useState(false);
+  const [webhookVerifyToken, setWebhookVerifyToken] = useState("");
+  const [generatingWebhookToken, setGeneratingWebhookToken] = useState(false);
+  const [copiedVerifyToken, setCopiedVerifyToken] = useState(false);
 
   // Live Test Sandbox state
   const [testMsg, setTestMsg] = useState("");
@@ -262,6 +265,57 @@ export const ClientWhatsAppQR: React.FC = () => {
   };
 
   const webhookUrl = `https://${window.location.host}/api/whatsapp/webhook/${currentWorkspace.id}`;
+
+  const handleGenerateWebhookToken = async () => {
+    setGeneratingWebhookToken(true);
+
+    try {
+      const res = await authenticatedFetch(
+        `/api/whatsapp/workspace/${currentWorkspace.id}/webhook-token`,
+        {
+          method: "POST",
+        }
+      );
+
+      const data = await res.json();
+
+      if (!res.ok || !data.success) {
+        throw new Error(
+          data.error ||
+          "Failed to generate webhook verify token"
+        );
+      }
+
+      setWebhookVerifyToken(
+        data.verifyToken || ""
+      );
+
+    } catch (error: any) {
+      alert(
+        error?.message ||
+        (isAr
+          ? "تعذر إنشاء Verify Token."
+          : "Could not generate Verify Token.")
+      );
+    } finally {
+      setGeneratingWebhookToken(false);
+    }
+  };
+
+  const handleCopyVerifyToken = () => {
+    if (!webhookVerifyToken) return;
+
+    navigator.clipboard.writeText(
+      webhookVerifyToken
+    );
+
+    setCopiedVerifyToken(true);
+
+    setTimeout(
+      () => setCopiedVerifyToken(false),
+      2500
+    );
+  };
 
   const handleCopyWebhook = () => {
     navigator.clipboard.writeText(webhookUrl);
@@ -544,6 +598,76 @@ export const ClientWhatsAppQR: React.FC = () => {
                 {copiedUrl ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
                 <span>{copiedUrl ? (isAr ? "تم النسخ!" : "Copied!") : isAr ? "نسخ" : "Copy"}</span>
               </button>
+            </div>
+
+            <div className="space-y-2 pt-2">
+              <div className="flex items-center justify-between gap-2">
+                <label className="font-bold text-slate-800 dark:text-slate-200 text-xs">
+                  {isAr
+                    ? "Verify Token الخاص بـ Meta"
+                    : "Meta Verify Token"}
+                </label>
+
+                <button
+                  type="button"
+                  onClick={handleGenerateWebhookToken}
+                  disabled={generatingWebhookToken}
+                  className="rounded-lg bg-emerald-600 px-3 py-1.5 text-[10px] font-black text-white hover:bg-emerald-500 disabled:opacity-50"
+                >
+                  {generatingWebhookToken
+                    ? isAr
+                      ? "جاري الإنشاء..."
+                      : "Generating..."
+                    : webhookVerifyToken
+                    ? isAr
+                      ? "إعادة إنشاء Token"
+                      : "Regenerate Token"
+                    : isAr
+                    ? "إنشاء Verify Token"
+                    : "Generate Verify Token"}
+                </button>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  readOnly
+                  value={webhookVerifyToken}
+                  placeholder={
+                    isAr
+                      ? "اضغط إنشاء Verify Token"
+                      : "Click Generate Verify Token"
+                  }
+                  className="flex-1 rounded-xl border border-slate-200 bg-slate-100 px-3 py-2 font-mono text-[11px] text-slate-600 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-400"
+                />
+
+                <button
+                  type="button"
+                  onClick={handleCopyVerifyToken}
+                  disabled={!webhookVerifyToken}
+                  className="px-3 py-2 rounded-xl bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-200 font-bold text-xs hover:bg-emerald-600 hover:text-white transition flex items-center gap-1.5 disabled:opacity-40"
+                >
+                  {copiedVerifyToken
+                    ? <Check className="h-3.5 w-3.5 text-emerald-500" />
+                    : <Copy className="h-3.5 w-3.5" />}
+
+                  <span>
+                    {copiedVerifyToken
+                      ? isAr
+                        ? "تم النسخ!"
+                        : "Copied!"
+                      : isAr
+                      ? "نسخ"
+                      : "Copy"}
+                  </span>
+                </button>
+              </div>
+
+              <p className="text-[10px] text-slate-400 leading-relaxed">
+                {isAr
+                  ? "استخدم Callback URL و Verify Token داخل إعدادات Webhooks في Meta. الـVerify Token يتم تخزينه مشفّرًا لكل منشأة."
+                  : "Use the Callback URL and Verify Token in Meta Webhooks settings. The Verify Token is stored encrypted per workspace."}
+              </p>
             </div>
           </div>
         </div>

@@ -18,6 +18,7 @@ import {
   encryptSecret,
   decryptSecret,
 } from "./src/services/secretService";
+import { randomBytes } from "crypto";
 import express from "express";
 import path from "path";
 import dotenv from "dotenv";
@@ -3441,6 +3442,487 @@ async function callWhatsAppGraphApi(
     data,
   };
 }
+
+// ----------------------------------------------------------
+// WHATSAPP WEBHOOK VERIFY TOKEN
+// ----------------------------------------------------------
+
+app.post(
+  "/api/whatsapp/workspace/:workspaceId/webhook-token",
+  authenticateFirebaseRequest,
+  async (req: any, res) => {
+    try {
+      const workspace = requireAuthenticatedWorkspace(
+        req,
+        res,
+        req.params.workspaceId
+      );
+
+      if (!workspace) return;
+
+      const access = requireWorkspaceFeature(
+        workspace,
+        "whatsapp"
+      );
+
+      if (!access.allowed) {
+        return res.status(access.status).json(access);
+      }
+
+      const workspaceId = String(workspace.id);
+
+      // Generate a high-entropy token server-side.
+      const verifyToken = randomBytes(32).toString("hex");
+
+      await setWorkspaceSecret(
+        workspaceId,
+        "whatsappVerifyToken",
+        verifyToken
+      );
+
+      console.log(
+        `🔐 [WhatsApp Webhook] Verify token generated | Workspace=${workspaceId}`
+      );
+
+      return res.json({
+        success: true,
+        workspaceId,
+        verifyToken,
+        webhookPath:
+          `/api/whatsapp/webhook/${encodeURIComponent(workspaceId)}`,
+      });
+    } catch (error: any) {
+      console.error(
+        "[WhatsApp Webhook Token Error]",
+        error?.message || error
+      );
+
+      return res.status(500).json({
+        success: false,
+        error: "Failed to generate WhatsApp webhook verify token",
+      });
+    }
+  }
+);
+
+// ----------------------------------------------------------
+// WHATSAPP TENANT AI MESSAGE PROCESSING
+// ----------------------------------------------------------
+
+async function generateWorkspaceWhatsAppReply(
+  workspace: any,
+  customerNumber: string,
+  userMsg: string
+) {
+  const whatsappAccess =
+    requireWorkspaceFeature(
+      workspace,
+      "whatsapp"
+    );
+
+  if (!whatsappAccess.allowed) {
+    console.warn(
+      `🔒 [FOX WhatsApp] Subscription blocked | Workspace=${workspace?.id}`
+    );
+
+    return "خدمة WhatsApp غير متاحة ضمن الباقة الحالية للمنشأة.";
+  }
+
+  const result =
+    await aiAgentService.generateChatResponse({
+      workspace,
+      message: userMsg,
+      channel: "whatsapp",
+      sessionId:
+        `whatsapp:${workspace.id}:${customerNumber}`,
+    });
+
+  return (
+    result?.response ||
+    result?.aiResponse ||
+    "شكراً لتواصلك معنا. كيف يمكننا مساعدتك؟"
+  );
+}
+
+async function claimWhatsAppMessage(
+  workspaceId: string,
+  messageId: string
+): Promise<boolean> {
+  const safeMessageId =
+    encodeURIComponent(messageId);
+
+  const ref = adminDb
+    .collection("whatsappProcessedMessages")
+    .doc(workspaceId)
+    .collection("messages")
+    .doc(safeMessageId);
+
+  try {
+    await ref.create({
+      workspaceId,
+      messageId,
+      createdAt:
+        new Date().toISOString(),
+    });
+
+    return true;
+
+  } catch (error: any) {
+    // Firestore ALREADY_EXISTS => duplicate webhook delivery.
+    if (
+      error?.code === 6 ||
+      error?.code === "already-exists"
+    ) {
+      return false;
+    }
+
+    throw error;
+  }
+}
+
+async function processWorkspaceWhatsAppWebhook(
+  workspaceId: string,
+  body: any
+) {
+  const workspace =
+    getWorkspaceById(workspaceId);
+
+  if (!workspace) {
+    console.warn(
+      `⚠️ [WhatsApp] Unknown workspace | Workspace=${workspaceId}`
+    );
+    return;
+  }
+
+  const featureAccess =
+    requireWorkspaceFeature(
+      workspace,
+      "whatsapp"
+    );
+
+  if (!featureAccess.allowed) {
+    console.warn(
+      `🔒 [WhatsApp] Subscription blocked | Workspace=${workspaceId}`
+    );
+    return;
+  }
+
+  const entries =
+    Array.isArray(body?.entry)
+      ? body.entry
+      : [];
+
+  for (const entry of entries) {
+    const changes =
+      Array.isArray(entry?.changes)
+        ? entry.changes
+        : [];
+
+    for (const change of changes) {
+      const value =
+        change?.value || {};
+
+      const incomingPhoneNumberId =
+        String(
+          value?.metadata?.phone_number_id ||
+          ""
+        ).trim();
+
+      // Status callbacks have no customer messages.
+      const messages =
+        Array.isArray(value?.messages)
+          ? value.messages
+          : [];
+
+      if (!messages.length) {
+        continue;
+      }
+
+      const expectedPhoneNumberId =
+        String(
+          workspace.whatsappPhoneNumberId ||
+          ""
+        ).trim();
+
+      if (
+        !expectedPhoneNumberId ||
+        incomingPhoneNumberId !==
+          expectedPhoneNumberId
+      ) {
+        console.warn(
+          `🚨 [WhatsApp Security] Phone Number ID mismatch | Workspace=${workspaceId} | Expected=${expectedPhoneNumberId || "NONE"} | Received=${incomingPhoneNumberId || "NONE"}`
+        );
+
+        continue;
+      }
+
+      const accessToken =
+        await getWorkspaceSecret(
+          workspaceId,
+          "whatsappAccessToken"
+        );
+
+      if (!accessToken) {
+        console.warn(
+          `🔒 [WhatsApp] Access token missing | Workspace=${workspaceId}`
+        );
+
+        continue;
+      }
+
+      for (const message of messages) {
+        const messageId =
+          String(
+            message?.id || ""
+          ).trim();
+
+        const customerNumber =
+          String(
+            message?.from || ""
+          ).trim();
+
+        if (
+          !messageId ||
+          !customerNumber
+        ) {
+          continue;
+        }
+
+        const firstDelivery =
+          await claimWhatsAppMessage(
+            workspaceId,
+            messageId
+          );
+
+        if (!firstDelivery) {
+          console.log(
+            `♻️ [WhatsApp] Duplicate ignored | Workspace=${workspaceId} | Message=${messageId}`
+          );
+
+          continue;
+        }
+
+        // Phase 1 supports text messages only.
+        if (
+          message?.type !== "text" ||
+          !message?.text?.body
+        ) {
+          console.log(
+            `ℹ️ [WhatsApp] Unsupported message type ignored | Workspace=${workspaceId} | Type=${message?.type || "unknown"}`
+          );
+
+          continue;
+        }
+
+        const userMsg =
+          String(
+            message.text.body
+          ).trim();
+
+        if (!userMsg) {
+          continue;
+        }
+
+        console.log(
+          `🏢 [Workspace WhatsApp] ${workspace.name || workspaceId} | ${customerNumber}: "${userMsg}"`
+        );
+
+        try {
+          const replyText =
+            await generateWorkspaceWhatsAppReply(
+              workspace,
+              customerNumber,
+              userMsg
+            );
+
+          const sendResult =
+            await callWhatsAppGraphApi(
+              `${encodeURIComponent(
+                incomingPhoneNumberId
+              )}/messages`,
+              accessToken,
+              {
+                method: "POST",
+                body: JSON.stringify({
+                  messaging_product:
+                    "whatsapp",
+
+                  recipient_type:
+                    "individual",
+
+                  to:
+                    customerNumber,
+
+                  type:
+                    "text",
+
+                  text: {
+                    preview_url:
+                      false,
+                    body:
+                      replyText,
+                  },
+                }),
+              }
+            );
+
+          if (sendResult.ok) {
+            console.log(
+              `✅ [Workspace WhatsApp Reply] ${workspace.name || workspaceId} -> ${customerNumber}`
+            );
+          } else {
+            console.warn(
+              `⚠️ [Workspace WhatsApp Reply Failed] Workspace=${workspaceId} | HTTP=${sendResult.status}`,
+              sendResult.data
+            );
+          }
+
+        } catch (error: any) {
+          console.error(
+            `❌ [Workspace WhatsApp Processing] Workspace=${workspaceId} | Message=${messageId}`,
+            error?.message || error
+          );
+        }
+      }
+    }
+  }
+}
+
+// ----------------------------------------------------------
+// META WEBHOOK VERIFICATION
+// ----------------------------------------------------------
+
+app.post(
+  "/api/whatsapp/webhook/:workspaceId",
+  async (req: any, res) => {
+    const workspaceId =
+      String(
+        req.params.workspaceId || ""
+      ).trim();
+
+    if (!workspaceId) {
+      return res.sendStatus(400);
+    }
+
+    const workspace =
+      getWorkspaceById(
+        workspaceId
+      );
+
+    if (!workspace) {
+      console.warn(
+        `⚠️ [WhatsApp Webhook] Unknown workspace POST | Workspace=${workspaceId}`
+      );
+
+      return res.sendStatus(404);
+    }
+
+    /*
+     * Acknowledge Meta immediately.
+     *
+     * AI generation and the outbound reply continue
+     * asynchronously so webhook delivery is not blocked
+     * by model latency.
+     */
+    res.sendStatus(200);
+
+    void processWorkspaceWhatsAppWebhook(
+      workspaceId,
+      req.body
+    ).catch((error) => {
+      console.error(
+        `❌ [WhatsApp Webhook Async Error] Workspace=${workspaceId}`,
+        error?.message || error
+      );
+    });
+  }
+);
+
+app.get(
+  "/api/whatsapp/webhook/:workspaceId",
+  async (req: any, res) => {
+    try {
+      const workspaceId = String(
+        req.params.workspaceId || ""
+      );
+
+      const mode = String(
+        req.query["hub.mode"] || ""
+      );
+
+      const suppliedToken = String(
+        req.query["hub.verify_token"] || ""
+      );
+
+      const challenge = String(
+        req.query["hub.challenge"] || ""
+      );
+
+      if (
+        !workspaceId ||
+        mode !== "subscribe" ||
+        !suppliedToken ||
+        !challenge
+      ) {
+        return res.sendStatus(400);
+      }
+
+      // Ensure the workspace really exists.
+      const workspace = getWorkspaceById(workspaceId);
+
+      if (!workspace) {
+        console.warn(
+          `⚠️ [WhatsApp Webhook] Unknown workspace | Workspace=${workspaceId}`
+        );
+        return res.sendStatus(404);
+      }
+
+      const access = requireWorkspaceFeature(
+        workspace,
+        "whatsapp"
+      );
+
+      if (!access.allowed) {
+        console.warn(
+          `🔒 [WhatsApp Webhook] WhatsApp entitlement denied | Workspace=${workspaceId}`
+        );
+        return res.sendStatus(403);
+      }
+
+      const expectedToken = await getWorkspaceSecret(
+        workspaceId,
+        "whatsappVerifyToken"
+      );
+
+      if (
+        !expectedToken ||
+        suppliedToken !== expectedToken
+      ) {
+        console.warn(
+          `⛔ [WhatsApp Webhook] Verification rejected | Workspace=${workspaceId}`
+        );
+        return res.sendStatus(403);
+      }
+
+      console.log(
+        `✅ [WhatsApp Webhook] Meta verification successful | Workspace=${workspaceId}`
+      );
+
+      // Meta expects the challenge as plain text.
+      return res
+        .status(200)
+        .type("text/plain")
+        .send(challenge);
+    } catch (error: any) {
+      console.error(
+        "[WhatsApp Webhook Verify Error]",
+        error?.message || error
+      );
+
+      return res.sendStatus(500);
+    }
+  }
+);
 
 // ----------------------------------------------------------
 // CONNECT WHATSAPP
