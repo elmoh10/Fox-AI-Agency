@@ -7,6 +7,11 @@ import {
   adminAuth,
   adminDb,
 } from "./src/services/firebaseAdmin";
+
+import {
+  encryptSecret,
+  decryptSecret,
+} from "./src/services/secretService";
 import express from "express";
 import path from "path";
 import dotenv from "dotenv";
@@ -1005,6 +1010,104 @@ Be professional, analytical, and friendly. Provide actionable advice. You can us
 
 // Official Telegram Bot Active Token & Agency Config
 let activeTelegramToken = process.env.TELEGRAM_BOT_TOKEN || "";
+
+// ============================================================
+// SECURE AGENCY TELEGRAM TOKEN STORAGE
+// Firestore stores AES-256-GCM encrypted data only.
+// The real token never leaves the backend.
+// ============================================================
+
+async function persistAgencyTelegramToken(
+  token: string
+) {
+  const cleanToken = String(token || "").trim();
+
+  if (!cleanToken) {
+    throw new Error("Telegram token cannot be empty");
+  }
+
+  const encrypted = encryptSecret(cleanToken);
+
+  await adminDb
+    .collection("agencySettings")
+    .doc("telegram")
+    .set(
+      {
+        tokenEncrypted: encrypted,
+        hasToken: true,
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
+
+  activeTelegramToken = cleanToken;
+
+  console.log(
+    "🔐 [Agency Telegram] Token encrypted and persisted"
+  );
+}
+
+async function hydrateAgencyTelegramToken() {
+  try {
+    const ref = adminDb
+      .collection("agencySettings")
+      .doc("telegram");
+
+    const snapshot = await ref.get();
+
+    if (snapshot.exists) {
+      const data: any = snapshot.data() || {};
+
+      if (
+        data.tokenEncrypted?.iv &&
+        data.tokenEncrypted?.tag &&
+        data.tokenEncrypted?.data
+      ) {
+        const decrypted = decryptSecret(
+          data.tokenEncrypted
+        );
+
+        if (decrypted.trim()) {
+          activeTelegramToken = decrypted.trim();
+
+          console.log(
+            "🔐 [Agency Telegram] Encrypted token loaded from Firestore"
+          );
+
+          return true;
+        }
+      }
+    }
+
+    // One-time migration from the existing environment token.
+    if (activeTelegramToken.trim()) {
+      await persistAgencyTelegramToken(
+        activeTelegramToken
+      );
+
+      console.log(
+        "🔄 [Agency Telegram] Environment token migrated to encrypted Firestore storage"
+      );
+
+      return true;
+    }
+
+    console.warn(
+      "⚠️ [Agency Telegram] No Telegram token configured"
+    );
+
+    return false;
+
+  } catch (error) {
+    console.error(
+      "❌ [Agency Telegram] Secure token hydration failed:",
+      error
+    );
+
+    // Keep the .env token as emergency fallback if available.
+    return Boolean(activeTelegramToken);
+  }
+}
 
 // Facebook Messenger Config
 let activeFacebookVerifyToken = process.env.FACEBOOK_VERIFY_TOKEN || "";
@@ -3122,28 +3225,50 @@ if (directPricingRequests.includes(lower)) {
 }
 
 // Get Bot Config Endpoint
-app.get("/api/telegram/bot-config", (_req, res) => {
-  return res.json({ success: true, config: agencyBotConfig });
-});
+app.get(
+  "/api/telegram/bot-config",
+  authenticateFirebaseRequest,
+  requireSuperAdmin,
+  (_req, res) => {
+    return res.json({
+      success: true,
+      config: agencyBotConfig,
+      hasToken: Boolean(activeTelegramToken),
+      tokenMasked: activeTelegramToken
+        ? `••••••••${activeTelegramToken.slice(-4)}`
+        : null,
+    });
+  }
+);
 
 // Update Bot Config Endpoint
-app.post("/api/telegram/bot-config", (req, res) => {
-  const { config } = req.body;
-  if (!config || typeof config !== "object") {
-    return res.status(400).json({ error: "Config object is required" });
+app.post(
+  "/api/telegram/bot-config",
+  authenticateFirebaseRequest,
+  requireSuperAdmin,
+  (req, res) => {
+    const { config } = req.body;
+
+    if (!config || typeof config !== "object") {
+      return res.status(400).json({
+        error: "Config object is required",
+      });
+    }
+
+    agencyBotConfig = {
+      ...agencyBotConfig,
+      ...config,
+    };
+
+    return res.json({
+      success: true,
+      message:
+        "Agency Telegram Bot settings updated successfully!",
+      config: agencyBotConfig,
+      hasToken: Boolean(activeTelegramToken),
+    });
   }
-
-  agencyBotConfig = {
-    ...agencyBotConfig,
-    ...config,
-  };
-
-  return res.json({
-    success: true,
-    message: "Agency Telegram Bot settings updated successfully!",
-    config: agencyBotConfig,
-  });
-});
+);
 
 // Telegram Polling Engine for Real-Time Telegram Response
 let isBotEnabled = true;
@@ -3219,8 +3344,8 @@ async function startTelegramPolling() {
   pollLoop();
 }
 
-// Start Polling Service Immediately
-startTelegramPolling();
+// Agency Telegram polling starts from startServer()
+// after the encrypted token has been hydrated.
 
 // Agency-management authorization.
 // These routes control the FOX AI AGENCY main Telegram bot,
@@ -3323,24 +3448,65 @@ app.post(
     return res.status(400).json({ error: "Token is required" });
   }
 
-  activeTelegramToken = token.trim();
+  const previousToken = activeTelegramToken;
+  const candidateToken = token.trim();
+
+  // Temporarily use the candidate only for BotFather validation.
+  activeTelegramToken = candidateToken;
+
   const data = await callTelegramApi("getMe");
 
   if (data && data.ok) {
-    await callTelegramApi("deleteWebhook", { drop_pending_updates: false }).catch(() => {});
-    isPollingActive = false; // Reset offset / restart loop with new token
+    try {
+      // Persist only after BotFather confirms the token.
+      await persistAgencyTelegramToken(
+        candidateToken
+      );
+    } catch (error: any) {
+      activeTelegramToken = previousToken;
+
+      console.error(
+        "[Agency Telegram] Secure token save failed:",
+        error
+      );
+
+      return res.status(500).json({
+        success: false,
+        error:
+          "Telegram token was valid but could not be stored securely.",
+      });
+    }
+
+    await callTelegramApi(
+      "deleteWebhook",
+      { drop_pending_updates: false }
+    ).catch(() => {});
+
+    isPollingActive = false;
     lastUpdateOffset = 0;
-    setTimeout(() => startTelegramPolling(), 500);
+
+    setTimeout(
+      () => startTelegramPolling(),
+      500
+    );
 
     return res.json({
       success: true,
       botInfo: data.result,
-      message: "Telegram Bot Token updated and verified successfully! Polling active.",
+      hasToken: true,
+      message:
+        "Telegram Bot Token updated, encrypted and verified successfully.",
     });
+
   } else {
+    // Never replace the working token with an invalid candidate.
+    activeTelegramToken = previousToken;
+
     return res.status(400).json({
       success: false,
-      error: data?.description || "Invalid Telegram Bot Token from BotFather",
+      error:
+        data?.description ||
+        "Invalid Telegram Bot Token from BotFather",
     });
   }
 });
@@ -3864,6 +4030,18 @@ app.post("/api/n8n/webhook", async (req, res) => {
 
 // Vite Middleware for Development / Static serving for Production
 async function startServer() {
+  // --------------------------------------------------------
+  // Secure Agency Telegram startup
+  // --------------------------------------------------------
+  await hydrateAgencyTelegramToken();
+
+  if (
+    activeTelegramToken &&
+    isBotEnabled
+  ) {
+    startTelegramPolling();
+  }
+
   // --------------------------------------------------------
   // Persistent tenant startup
   // --------------------------------------------------------

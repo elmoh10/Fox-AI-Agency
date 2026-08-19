@@ -84,6 +84,8 @@ export const AdminTelegramBot: React.FC = () => {
 
   // Connection State
   const [token, setToken] = useState("");
+  const [hasSavedToken, setHasSavedToken] = useState(false);
+  const [tokenMasked, setTokenMasked] = useState<string | null>(null);
   const [botInfo, setBotInfo] = useState<any>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [isBotEnabled, setIsBotEnabled] = useState(true);
@@ -159,14 +161,14 @@ export const AdminTelegramBot: React.FC = () => {
     try {
       const [resStatus, resConfig] = await Promise.all([
         authenticatedFetch("/api/telegram/status"),
-        fetch("/api/telegram/bot-config"),
+        authenticatedFetch("/api/telegram/bot-config"),
       ]);
 
       const dataStatus = await resStatus.json();
       if (dataStatus.connected && dataStatus.botInfo) {
         setIsConnected(true);
         setBotInfo(dataStatus.botInfo);
-        if (dataStatus.token) setToken(dataStatus.token);
+        // Never load the real Telegram token into the browser.
       } else {
         setIsConnected(false);
         setBotInfo(null);
@@ -177,6 +179,15 @@ export const AdminTelegramBot: React.FC = () => {
       }
 
       const dataConfig = await resConfig.json();
+
+      if (typeof dataConfig.hasToken === "boolean") {
+        setHasSavedToken(dataConfig.hasToken);
+      }
+
+      if (dataConfig.tokenMasked) {
+        setTokenMasked(dataConfig.tokenMasked);
+      }
+
       if (dataConfig.success && dataConfig.config) {
         setConfig(dataConfig.config);
       }
@@ -227,6 +238,13 @@ export const AdminTelegramBot: React.FC = () => {
       if (data.success && data.botInfo) {
         setIsConnected(true);
         setBotInfo(data.botInfo);
+        setHasSavedToken(true);
+        setTokenMasked(
+          token.trim().length >= 4
+            ? `••••••••${token.trim().slice(-4)}`
+            : "••••••••"
+        );
+        setToken("");
         alert(isAr ? "تم ربط توكن البوت بنجاح!" : "Bot token connected successfully!");
       } else {
         setIsConnected(false);
@@ -243,7 +261,7 @@ export const AdminTelegramBot: React.FC = () => {
     setSavingConfig(true);
     setSaveSuccess(false);
     try {
-      const res = await fetch("/api/telegram/bot-config", {
+      const res = await authenticatedFetch("/api/telegram/bot-config", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ config }),
@@ -879,6 +897,22 @@ export const AdminTelegramBot: React.FC = () => {
               )}
 
               {/* Token Form */}
+              <div className="mb-3">
+                {hasSavedToken ? (
+                  <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-500 font-bold">
+                    {isAr
+                      ? `✅ التوكن محفوظ ومؤمَّن${tokenMasked ? ` — ${tokenMasked}` : ""}`
+                      : `✅ Token saved securely${tokenMasked ? ` — ${tokenMasked}` : ""}`}
+                  </div>
+                ) : (
+                  <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-500 font-bold">
+                    {isAr
+                      ? "لا يوجد توكن محفوظ حالياً"
+                      : "No token is currently saved"}
+                  </div>
+                )}
+              </div>
+
               <form onSubmit={handleUpdateToken} className="space-y-3">
                 <label className="font-bold text-slate-700 dark:text-slate-300 text-xs flex items-center gap-1.5">
                   <Key className="h-3.5 w-3.5 text-blue-500" />
