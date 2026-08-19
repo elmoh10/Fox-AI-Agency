@@ -2936,6 +2936,30 @@ async function handleWorkspaceTelegramUpdate(
     console.log(
       `👤 [FOX CRM Telegram Sync] Workspace=${workspace.id} | Lead=${crmResult.lead.id} | Created=${crmResult.created}`
     );
+
+    // Enrich the same CRM customer from the current message.
+    await workspaceCrmService.enrichLeadFromMessage(
+      String(workspace.id),
+      String(crmResult.lead.id),
+      userMsg
+    );
+
+    // Link Unified Inbox conversation to the CRM customer.
+    await adminDb
+      .collection("workspaces")
+      .doc(String(workspace.id))
+      .collection("conversations")
+      .doc(inboxConversation.id)
+      .set(
+        {
+          crmLeadId:
+            String(crmResult.lead.id),
+
+          updatedAt:
+            new Date().toISOString(),
+        },
+        { merge: true }
+      );
   } catch (error: any) {
     console.error(
       `❌ [FOX CRM Telegram Sync] Workspace=${workspace.id} | Chat=${chatId}`,

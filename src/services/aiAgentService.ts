@@ -5,6 +5,7 @@ import { workspaceDataService } from "./workspaceDataService";
 import { triggerExternalCRM } from "./crmService";
 import { sharedMemoryService } from "./sharedMemoryService";
 import { creditService } from "./creditService";
+import { workspaceCrmService } from "./workspaceCrmService";
 
 export interface AiAgentConfig {
   agentName?: string;
@@ -65,6 +66,45 @@ export interface ChatResponse {
   detectedLanguage: "ar" | "en";
   source: string;
   suggestedActions: string[];
+}
+
+
+async function markBookingConversion(
+  workspaceId: string,
+  lead: any,
+  appointment: any,
+  customerName: string,
+  customerPhone: string
+) {
+  const leadId =
+    String(lead?.id || "").trim();
+
+  if (!leadId) {
+    console.warn(
+      `[FOX CRM Conversion] Booking saved but CRM Lead ID is missing | Workspace=${workspaceId}`
+    );
+    return;
+  }
+
+  try {
+    await workspaceCrmService.markCustomerConverted(
+      workspaceId,
+      leadId,
+      {
+        name: customerName,
+        phone: customerPhone,
+        conversionType: "appointment",
+        conversionId:
+          String(appointment?.id || "").trim() ||
+          undefined,
+      }
+    );
+  } catch (error: any) {
+    console.error(
+      `[FOX CRM Conversion] Appointment conversion sync failed | Workspace=${workspaceId} | Lead=${leadId}`,
+      error?.message || error
+    );
+  }
 }
 
 export class AiAgentService {
@@ -1963,25 +2003,52 @@ ${industryContext || "Standard business inquiry catalog."}
           );
 
         if (waitingForIdentity) {
-          const lines = String(message || "")
-            .split(/\n+/)
-            .map((x) => x.trim())
-            .filter(Boolean);
+          const identityMessage =
+            String(message || "").trim();
 
-          const phoneLine =
-            lines.find((line) => {
-              const digits = line.replace(/\D/g, "");
-              return digits.length >= 10 && digits.length <= 15;
-            }) || "";
+          // Extract phone independently from the message so name + phone
+          // can safely exist on the same line.
+          const phoneMatch =
+            identityMessage.match(
+              /(?:\+?\d[\d\s-]{8,16}\d)/
+            );
 
           const phone =
-            phoneLine.replace(/\D/g, "");
+            phoneMatch
+              ? phoneMatch[0].replace(/\D/g, "")
+              : "";
 
-          const customerName =
-            lines
-              .filter((line) => line !== phoneLine)
-              .join(" ")
+          // Remove the phone and common Arabic/English identity labels.
+          // Examples supported:
+          // "أحمد محمد 01012345678"
+          // "الاسم أحمد محمد ورقم الموبايل 01012345678"
+          // "اسمي أحمد محمد ورقمي 01012345678"
+          let customerName =
+            identityMessage;
+
+          if (phoneMatch) {
+            customerName =
+              customerName.replace(phoneMatch[0], " ");
+          }
+
+          customerName =
+            customerName
+              .replace(
+                /(?:الاسم|اسمي|اسم\s*صاحب\s*الحجز|name)\s*[:：-]?/gi,
+                " "
+              )
+              .replace(
+                /(?:و?رقم\s*(?:الموبايل|الموبيل|الهاتف|التليفون)|و?رقمي|phone(?:\s*number)?)\s*[:：-]?/gi,
+                " "
+              )
+              .replace(/\s+/g, " ")
+              .trim()
+              .replace(/^(?:و|هو|هي)\s+/i, "")
               .trim();
+
+          console.log(
+            `🪪 [FOX Booking Identity] Workspace=${workspace.id} | Name=${customerName || "NONE"} | PhoneCaptured=${!!phone}`
+          );
 
           const originalBookingRequest =
             bookingCtx.messages
@@ -2146,6 +2213,14 @@ ${industryContext || "Standard business inquiry catalog."}
                   sessionId: params.sessionId
                 }
               );
+
+            await markBookingConversion(
+              workspace.id,
+              lead,
+              appointment,
+              customerName,
+              phone
+            );
 
             console.log(
               `✅ [FOX CRM] Direct appointment saved | Workspace=${workspace.id} | Customer=${customerName} | ${bookingDate} ${bookingTime}`
@@ -2888,6 +2963,14 @@ DATE SAFETY RULES:
                           }
                         }
 
+                        await markBookingConversion(
+                          workspace.id,
+                          lead,
+                          appointment,
+                          freshName,
+                          freshPhone
+                        );
+
                         console.log(
                           `✅ [FOX CRM] Deterministic appointment saved | Workspace=${workspace.id} | Customer=${freshName} | ${date} ${time}`
                         );
@@ -3136,6 +3219,14 @@ DATE SAFETY RULES:
                           );
                         }
                       }
+
+                      await markBookingConversion(
+                        workspace.id,
+                        lead,
+                        appointment,
+                        name,
+                        phone
+                      );
 
                       console.log(
                         `✅ [FOX CRM] Appointment saved | Workspace=${workspace.id} | Customer=${name} | ${date} ${time}`
@@ -3500,6 +3591,14 @@ DATE SAFETY RULES:
                       );
                     }
                   }
+
+                  await markBookingConversion(
+                    workspace.id,
+                    lead,
+                    appointment,
+                    name,
+                    phone
+                  );
 
                   console.log(
                     `[FOX CRM] Appointment saved | Workspace=${workspace.id} | Customer=${name} | ${date} ${time}`

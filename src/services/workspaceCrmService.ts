@@ -1,4 +1,5 @@
 import { adminDb } from "./firebaseAdmin";
+import { FieldValue } from "firebase-admin/firestore";
 
 export type CrmChannel =
   | "telegram"
@@ -38,6 +39,140 @@ function buildLeadId(
       .slice(0, 120);
 
   return `${safeChannel}_${safeCustomer}`;
+}
+
+
+function extractPhoneFromMessage(message: string): string {
+  const text = clean(message);
+
+  const matches =
+    text.match(
+      /(?:\+?20[\s-]?)?0?1[0125](?:[\s-]?\d){8}/g
+    ) || [];
+
+  if (!matches.length) {
+    return "";
+  }
+
+  let phone = matches[0]
+    .replace(/[\s-]/g, "")
+    .trim();
+
+  if (phone.startsWith("+20")) {
+    phone = "0" + phone.slice(3);
+  } else if (
+    phone.startsWith("20") &&
+    phone.length === 12
+  ) {
+    phone = "0" + phone.slice(2);
+  }
+
+  return phone;
+}
+
+function detectCustomerIntent(message: string): {
+  intent: string;
+  tag?: string;
+  shouldPromoteToProspect: boolean;
+} {
+  const text = clean(message).toLowerCase();
+
+  const bookingWords = [
+    "حجز",
+    "احجز",
+    "أحجز",
+    "ميعاد",
+    "موعد",
+    "appointment",
+    "book",
+    "booking",
+  ];
+
+  const priceWords = [
+    "سعر",
+    "الاسعار",
+    "الأسعار",
+    "بكام",
+    "تكلفة",
+    "price",
+    "pricing",
+    "cost",
+  ];
+
+  const orderWords = [
+    "عاوز اشتري",
+    "عايز اشتري",
+    "شراء",
+    "اطلب",
+    "أطلب",
+    "اوردر",
+    "أوردر",
+    "order",
+    "buy",
+  ];
+
+  const complaintWords = [
+    "شكوى",
+    "مشكلة",
+    "مش عاجبني",
+    "سيء",
+    "وحش",
+    "complaint",
+    "problem",
+  ];
+
+  if (
+    bookingWords.some((word) =>
+      text.includes(word)
+    )
+  ) {
+    return {
+      intent: "booking",
+      tag: "booking_interest",
+      shouldPromoteToProspect: true,
+    };
+  }
+
+  if (
+    orderWords.some((word) =>
+      text.includes(word)
+    )
+  ) {
+    return {
+      intent: "purchase",
+      tag: "purchase_interest",
+      shouldPromoteToProspect: true,
+    };
+  }
+
+  if (
+    priceWords.some((word) =>
+      text.includes(word)
+    )
+  ) {
+    return {
+      intent: "pricing",
+      tag: "pricing_interest",
+      shouldPromoteToProspect: true,
+    };
+  }
+
+  if (
+    complaintWords.some((word) =>
+      text.includes(word)
+    )
+  ) {
+    return {
+      intent: "complaint",
+      tag: "complaint",
+      shouldPromoteToProspect: false,
+    };
+  }
+
+  return {
+    intent: "general",
+    shouldPromoteToProspect: false,
+  };
 }
 
 export const workspaceCrmService = {
@@ -199,6 +334,211 @@ export const workspaceCrmService = {
     return {
       created: true,
       lead,
+    };
+  },
+
+  async enrichLeadFromMessage(
+    workspaceId: string,
+    leadId: string,
+    message: string
+  ) {
+    const cleanWorkspaceId =
+      clean(workspaceId);
+
+    const cleanLeadId =
+      clean(leadId);
+
+    const cleanMessage =
+      clean(message);
+
+    if (
+      !cleanWorkspaceId ||
+      !cleanLeadId ||
+      !cleanMessage
+    ) {
+      return null;
+    }
+
+    const ref = adminDb
+      .collection("workspaces")
+      .doc(cleanWorkspaceId)
+      .collection("crmLeads")
+      .doc(cleanLeadId);
+
+    const snapshot =
+      await ref.get();
+
+    if (!snapshot.exists) {
+      return null;
+    }
+
+    const current: any =
+      snapshot.data() || {};
+
+    const detectedPhone =
+      extractPhoneFromMessage(
+        cleanMessage
+      );
+
+    const intent =
+      detectCustomerIntent(
+        cleanMessage
+      );
+
+    const now =
+      new Date().toISOString();
+
+    const updates: any = {
+      lastInteraction: now,
+      updatedAt: now,
+      lastMessage: cleanMessage,
+      lastIntent: intent.intent,
+    };
+
+    if (
+      detectedPhone &&
+      detectedPhone !== current.phone
+    ) {
+      updates.phone =
+        detectedPhone;
+
+      updates.phoneNormalized =
+        normalizePhone(
+          detectedPhone
+        );
+
+      updates.phoneCapturedAt =
+        now;
+    }
+
+    if (intent.tag) {
+      updates.tags =
+        FieldValue.arrayUnion(
+          intent.tag
+        );
+    }
+
+    if (
+      intent.shouldPromoteToProspect &&
+      (
+        !current.status ||
+        current.status === "Lead"
+      )
+    ) {
+      updates.status =
+        "Prospect";
+    }
+
+    await ref.set(
+      updates,
+      { merge: true }
+    );
+
+    console.log(
+      `🧠 [FOX CRM Intelligence] Workspace=${cleanWorkspaceId} | Lead=${cleanLeadId} | Intent=${intent.intent} | PhoneCaptured=${Boolean(detectedPhone)}`
+    );
+
+    const updated =
+      await ref.get();
+
+    return {
+      id: updated.id,
+      ...updated.data(),
+    };
+  },
+
+  async markCustomerConverted(
+    workspaceId: string,
+    leadId: string,
+    data: {
+      name?: string;
+      phone?: string;
+      conversionType:
+        | "appointment"
+        | "sale"
+        | "order";
+      conversionId?: string;
+    }
+  ) {
+    const cleanWorkspaceId =
+      clean(workspaceId);
+
+    const cleanLeadId =
+      clean(leadId);
+
+    const ref = adminDb
+      .collection("workspaces")
+      .doc(cleanWorkspaceId)
+      .collection("crmLeads")
+      .doc(cleanLeadId);
+
+    const snapshot =
+      await ref.get();
+
+    if (!snapshot.exists) {
+      return null;
+    }
+
+    const now =
+      new Date().toISOString();
+
+    const updates: any = {
+      status: "Customer",
+      lastInteraction: now,
+      updatedAt: now,
+      convertedAt: now,
+      conversionType:
+        data.conversionType,
+    };
+
+    const customerName =
+      clean(data.name);
+
+    const customerPhone =
+      normalizePhone(
+        data.phone || ""
+      );
+
+    if (customerName) {
+      updates.name =
+        customerName;
+    }
+
+    if (customerPhone) {
+      updates.phone =
+        customerPhone;
+
+      updates.phoneNormalized =
+        customerPhone;
+    }
+
+    if (
+      clean(data.conversionId)
+    ) {
+      updates.lastConversionId =
+        clean(data.conversionId);
+    }
+
+    updates.tags =
+      FieldValue.arrayUnion(
+        "customer",
+        `converted_${data.conversionType}`
+      );
+
+    await ref.set(
+      updates,
+      { merge: true }
+    );
+
+    console.log(
+      `🎯 [FOX CRM Conversion] Workspace=${cleanWorkspaceId} | Lead=${cleanLeadId} | Type=${data.conversionType} | Status=Customer`
+    );
+
+    return {
+      id: cleanLeadId,
+      ...((
+        await ref.get()
+      ).data() || {}),
     };
   },
 
