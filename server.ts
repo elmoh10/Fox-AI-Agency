@@ -26,6 +26,7 @@ import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import { aiAgentService } from "./src/services/aiAgentService";
 import { sharedMemoryService } from "./src/services/sharedMemoryService";
+import { conversationService } from "./src/services/conversationService";
 import { emailService } from "./src/services/emailService";
 import { TrialLimitManager } from "./src/services/TrialLimitManager";
 import { db } from "./src/services/firebase";
@@ -2891,6 +2892,57 @@ async function handleWorkspaceTelegramUpdate(
   );
 
   // -------------------------------------------------------
+  // REAL UNIFIED INBOX STORAGE
+  // -------------------------------------------------------
+  const telegramSessionId =
+    `telegram:${workspace.id}:${chatId}`;
+
+  const telegramCustomerName =
+    [userInfo.first_name, userInfo.last_name]
+      .filter(Boolean)
+      .join(" ")
+      .trim() || "Telegram Customer";
+
+  const inboxConversation =
+    await conversationService.getOrCreateConversation(
+      String(workspace.id),
+      {
+        sessionId: telegramSessionId,
+        channel: "telegram",
+        externalChatId: chatId,
+        customerName: telegramCustomerName,
+      }
+    );
+
+  await conversationService.appendMessage(
+    String(workspace.id),
+    inboxConversation.id,
+    {
+      sessionId: telegramSessionId,
+      channel: "telegram",
+      sender: "customer",
+      text: userMsg,
+      externalMessageId:
+        update.message?.message_id
+          ? String(update.message.message_id)
+          : undefined,
+    }
+  );
+
+  // -------------------------------------------------------
+  // HUMAN TAKEOVER
+  // Customer messages are still saved to Unified Inbox,
+  // but AI must remain silent while a human owns the chat.
+  // -------------------------------------------------------
+  if (inboxConversation.assignedTo === "human") {
+    console.log(
+      `👤 [FOX Human Takeover] AI suppressed | Workspace=${workspace.id} | Conversation=${inboxConversation.id} | Chat=${chatId}`
+    );
+
+    return;
+  }
+
+  // -------------------------------------------------------
   // /start belongs to the tenant business, not Smart Router.
   // -------------------------------------------------------
   if (
@@ -3013,6 +3065,17 @@ async function handleWorkspaceTelegramUpdate(
   ) {
     workspaceTelegramRatingSessions.add(sessionKey);
   }
+
+  await conversationService.appendMessage(
+    String(workspace.id),
+    inboxConversation.id,
+    {
+      sessionId: telegramSessionId,
+      channel: "telegram",
+      sender: "ai",
+      text: replyText,
+    }
+  );
 
   const sendResult = await callWorkspaceTelegramApi(
     token,
@@ -4373,6 +4436,323 @@ app.delete(
   }
 );
 
+
+
+// ==========================================================
+// UNIFIED INBOX - RETURN CONVERSATION TO AI
+// ==========================================================
+
+app.post(
+  "/api/conversations/:conversationId/return-to-ai",
+  authenticateFirebaseRequest,
+  async (req: any, res) => {
+    try {
+      const conversationId =
+        String(req.params.conversationId || "").trim();
+
+      const workspaceId =
+        String(req.body?.workspaceId || "").trim();
+
+      if (!workspaceId) {
+        return res.status(400).json({
+          success: false,
+          code: "WORKSPACE_ID_REQUIRED",
+          error: "workspaceId is required",
+        });
+      }
+
+      if (!conversationId) {
+        return res.status(400).json({
+          success: false,
+          code: "CONVERSATION_ID_REQUIRED",
+          error: "conversationId is required",
+        });
+      }
+
+      const workspace =
+        requireAuthenticatedWorkspace(
+          req,
+          res,
+          workspaceId
+        );
+
+      if (!workspace) {
+        return;
+      }
+
+      const conversationRef =
+        adminDb
+          .collection("workspaces")
+          .doc(workspaceId)
+          .collection("conversations")
+          .doc(conversationId);
+
+      const conversationSnap =
+        await conversationRef.get();
+
+      if (!conversationSnap.exists) {
+        return res.status(404).json({
+          success: false,
+          code: "CONVERSATION_NOT_FOUND",
+          error: "Conversation not found",
+        });
+      }
+
+      const conversation: any =
+        conversationSnap.data() || {};
+
+      if (
+        String(conversation.workspaceId) !==
+        String(workspaceId)
+      ) {
+        return res.status(403).json({
+          success: false,
+          code: "CROSS_TENANT_BLOCKED",
+          error:
+            "Conversation does not belong to this workspace",
+        });
+      }
+
+      const now = new Date().toISOString();
+
+      await conversationRef.update({
+        assignedTo: "ai",
+        status: "ai_handled",
+        updatedAt: now,
+      });
+
+      console.log(
+        `🤖 [Unified Inbox Return To AI] Workspace=${workspaceId} | Conversation=${conversationId}`
+      );
+
+      return res.json({
+        success: true,
+        conversationId,
+        workspaceId,
+        assignedTo: "ai",
+        status: "ai_handled",
+      });
+
+    } catch (error: any) {
+      console.error(
+        "[Unified Inbox Return To AI Error]",
+        error?.message || error
+      );
+
+      return res.status(500).json({
+        success: false,
+        code: "RETURN_TO_AI_FAILED",
+        error:
+          "Failed to return conversation to AI",
+      });
+    }
+  }
+);
+
+
+// ==========================================================
+// UNIFIED INBOX - SECURE HUMAN REPLY
+// ==========================================================
+
+app.post(
+  "/api/conversations/:conversationId/reply",
+  authenticateFirebaseRequest,
+  async (req: any, res) => {
+    try {
+      const conversationId =
+        String(req.params.conversationId || "").trim();
+
+      const workspaceId =
+        String(req.body?.workspaceId || "").trim();
+
+      const text =
+        String(req.body?.text || "").trim();
+
+      if (!workspaceId) {
+        return res.status(400).json({
+          success: false,
+          code: "WORKSPACE_ID_REQUIRED",
+          error: "workspaceId is required",
+        });
+      }
+
+      if (!conversationId) {
+        return res.status(400).json({
+          success: false,
+          code: "CONVERSATION_ID_REQUIRED",
+          error: "conversationId is required",
+        });
+      }
+
+      if (!text) {
+        return res.status(400).json({
+          success: false,
+          code: "MESSAGE_REQUIRED",
+          error: "Message text is required",
+        });
+      }
+
+      const workspace =
+        requireAuthenticatedWorkspace(
+          req,
+          res,
+          workspaceId
+        );
+
+      if (!workspace) {
+        return;
+      }
+
+      const conversationSnap =
+        await adminDb
+          .collection("workspaces")
+          .doc(workspaceId)
+          .collection("conversations")
+          .doc(conversationId)
+          .get();
+
+      if (!conversationSnap.exists) {
+        return res.status(404).json({
+          success: false,
+          code: "CONVERSATION_NOT_FOUND",
+          error: "Conversation not found",
+        });
+      }
+
+      const conversation: any =
+        conversationSnap.data() || {};
+
+      if (
+        String(conversation.workspaceId) !==
+        String(workspaceId)
+      ) {
+        return res.status(403).json({
+          success: false,
+          code: "CROSS_TENANT_BLOCKED",
+          error: "Conversation does not belong to this workspace",
+        });
+      }
+
+      if (conversation.channel !== "telegram") {
+        return res.status(400).json({
+          success: false,
+          code: "CHANNEL_NOT_SUPPORTED",
+          error: "Human reply currently supports Telegram only",
+        });
+      }
+
+      const telegramAccess =
+        requireWorkspaceFeature(
+          workspace,
+          "telegram"
+        );
+
+      if (!telegramAccess.allowed) {
+        return res
+          .status(telegramAccess.status)
+          .json(telegramAccess);
+      }
+
+      const token =
+        await getWorkspaceTelegramRuntimeToken(
+          workspace
+        );
+
+      if (!token) {
+        return res.status(409).json({
+          success: false,
+          code: "TELEGRAM_NOT_CONNECTED",
+          error: "Telegram bot is not connected",
+        });
+      }
+
+      const chatId =
+        String(
+          conversation.externalChatId ||
+          conversation.customerId ||
+          ""
+        ).trim();
+
+      if (!chatId) {
+        return res.status(400).json({
+          success: false,
+          code: "CHAT_ID_MISSING",
+          error: "Telegram chat ID is missing",
+        });
+      }
+
+      const sendResult =
+        await callWorkspaceTelegramApi(
+          token,
+          "sendMessage",
+          {
+            chat_id: chatId,
+            text,
+          }
+        );
+
+      if (!sendResult?.ok) {
+        return res.status(502).json({
+          success: false,
+          code: "TELEGRAM_SEND_FAILED",
+          error:
+            sendResult?.description ||
+            "Failed to send Telegram message",
+        });
+      }
+
+      await conversationService.appendMessage(
+        workspaceId,
+        conversationId,
+        {
+          sessionId:
+            conversation.sessionId ||
+            `telegram:${workspaceId}:${chatId}`,
+          channel: "telegram",
+          sender: "human",
+          text,
+          externalMessageId:
+            sendResult?.result?.message_id
+              ? String(sendResult.result.message_id)
+              : undefined,
+        }
+      );
+
+      await adminDb
+        .collection("workspaces")
+        .doc(workspaceId)
+        .collection("conversations")
+        .doc(conversationId)
+        .update({
+          assignedTo: "human",
+          status: "open",
+          updatedAt: new Date().toISOString(),
+        });
+
+      console.log(
+        `👤 [Unified Inbox Human Reply] Workspace=${workspaceId} | Conversation=${conversationId} | Chat=${chatId}`
+      );
+
+      return res.json({
+        success: true,
+        sent: true,
+        conversationId,
+        channel: "telegram",
+      });
+
+    } catch (error: any) {
+      console.error(
+        "[Unified Inbox Human Reply Error]",
+        error?.message || error
+      );
+
+      return res.status(500).json({
+        success: false,
+        error: "Failed to send human reply",
+      });
+    }
+  }
+);
 
 
 // Client workspace Telegram connection status.
