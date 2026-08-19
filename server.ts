@@ -3140,12 +3140,201 @@ async function handleWorkspaceTelegramUpdate(
     return;
   }
 
+  // -------------------------------------------------------
+  // FOX TENANT COMPLAINT AUTO-DETECTION
+  // Detect real customer complaints from Telegram and persist
+  // them to the global complaints collection scoped by workspaceId.
+  // -------------------------------------------------------
+  const complaintKeywords = [
+    "شكوى",
+    "شكوي",
+    "مشكلة",
+    "مشكلتي",
+    "عندي مشكلة",
+    "بلاغ",
+    "متضايق",
+    "زعلان",
+    "خدمة سيئة",
+    "الخدمة سيئة",
+    "معاملة سيئة",
+    "محدش رد",
+    "محدش بيرد",
+    "لم يتم الرد",
+    "مش راضي",
+    "مش شغال",
+    "سيئة جدا",
+    "سيئ جدا",
+    "complaint",
+    "problem",
+    "bad service",
+    "no response"
+  ];
+
+  const normalizedComplaintMessage =
+    String(userMsg || "").trim().toLowerCase();
+
+  const isComplaint =
+    complaintKeywords.some((keyword) =>
+      normalizedComplaintMessage.includes(keyword)
+    );
+
+  let createdComplaintId: string | null = null;
+
+  if (isComplaint) {
+    try {
+      const complaintCustomerName =
+        [userInfo.first_name, userInfo.last_name]
+          .filter(Boolean)
+          .join(" ")
+          .trim() || "Telegram Customer";
+
+      // Try to get the latest CRM data for this Telegram customer.
+      let complaintPhone = "";
+
+      try {
+        const crmLeadId = `telegram_${chatId}`;
+
+        const crmLeadSnapshot = await adminDb
+          .collection("workspaces")
+          .doc(String(workspace.id))
+          .collection("crmLeads")
+          .doc(crmLeadId)
+          .get();
+
+        if (crmLeadSnapshot.exists) {
+          const crmLeadData: any = crmLeadSnapshot.data() || {};
+          complaintPhone =
+            String(
+              crmLeadData.phone ||
+              crmLeadData.customerPhone ||
+              ""
+            ).trim();
+        }
+      } catch (crmLookupError) {
+        console.warn(
+          `⚠️ [FOX Complaint] CRM phone lookup skipped | Workspace=${workspace.id}`,
+          crmLookupError
+        );
+      }
+
+      // Avoid duplicate complaints caused by repeated Telegram updates.
+      const recentComplaints = await adminDb
+        .collection("complaints")
+        .where("workspaceId", "==", String(workspace.id))
+        .where("channel", "==", "Telegram")
+        .limit(25)
+        .get();
+
+      const duplicateComplaint = recentComplaints.docs.some((doc) => {
+        const data: any = doc.data();
+
+        return (
+          String(data.externalChatId || "") === String(chatId) &&
+          String(data.issue || "").trim().toLowerCase() ===
+            normalizedComplaintMessage &&
+          data.status !== "Resolved"
+        );
+      });
+
+      if (!duplicateComplaint) {
+        createdComplaintId =
+          `cmp_tg_${String(workspace.id)}_${Date.now()}`;
+
+        const complaintDate =
+          new Date().toISOString().split("T")[0];
+
+        const complaintCreatedAt =
+          new Date().toISOString();
+
+        const priority =
+          normalizedComplaintMessage.includes("خطير") ||
+          normalizedComplaintMessage.includes("ضروري") ||
+          normalizedComplaintMessage.includes("كارثة") ||
+          normalizedComplaintMessage.includes("كارثه") ||
+          normalizedComplaintMessage.includes("urgent") ||
+          normalizedComplaintMessage.includes("emergency")
+            ? "High"
+            : "Medium";
+
+        await adminDb
+          .collection("complaints")
+          .doc(createdComplaintId)
+          .set({
+            id: createdComplaintId,
+            workspaceId: String(workspace.id),
+
+            customerName: complaintCustomerName,
+            customerPhone: complaintPhone,
+            phone: complaintPhone,
+
+            channel: "Telegram",
+            externalChatId: String(chatId),
+            sessionId: telegramSessionId,
+            conversationId: inboxConversation.id,
+
+            issue: String(userMsg).trim(),
+
+            aiResponse: "",
+            aiAutoResponse: "",
+
+            status: "Open",
+            priority,
+
+            date: complaintDate,
+            createdAt: complaintCreatedAt,
+            updatedAt: complaintCreatedAt,
+
+            source: "telegram_auto_detection"
+          });
+
+        console.log(
+          `🚨 [FOX Complaint Firestore] Created | Workspace=${workspace.id} | Complaint=${createdComplaintId} | Priority=${priority}`
+        );
+      } else {
+        console.log(
+          `ℹ️ [FOX Complaint] Duplicate skipped | Workspace=${workspace.id} | Chat=${chatId}`
+        );
+      }
+    } catch (complaintError) {
+      console.error(
+        `❌ [FOX Complaint Firestore] Save failed | Workspace=${workspace.id} | Chat=${chatId}`,
+        complaintError
+      );
+    }
+  }
+
   // Normal tenant AI flow
   const replyText = await generateWorkspaceTelegramReply(
     workspace,
     chatId,
     userMsg
   );
+
+  // Attach the actual AI reply to the newly-created complaint.
+  if (createdComplaintId) {
+    try {
+      await adminDb
+        .collection("complaints")
+        .doc(createdComplaintId)
+        .set(
+          {
+            aiResponse: replyText,
+            aiAutoResponse: replyText,
+            updatedAt: new Date().toISOString()
+          },
+          { merge: true }
+        );
+
+      console.log(
+        `🤖 [FOX Complaint AI Response] Updated | Workspace=${workspace.id} | Complaint=${createdComplaintId}`
+      );
+    } catch (complaintReplyError) {
+      console.error(
+        `❌ [FOX Complaint AI Response] Update failed | Complaint=${createdComplaintId}`,
+        complaintReplyError
+      );
+    }
+  }
 
   // If the AI explicitly asks for a 1-5 rating, remember that state.
   const normalizedReply = replyText.toLowerCase();
