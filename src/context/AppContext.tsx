@@ -1081,38 +1081,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return false;
     }
 
-    // TEMPORARY RECOVERY:
-    // Keep Agency Owner access working until the Super Admin
-    // account is migrated into Firebase Authentication.
-    if (trimmedEmail === "info.hesham.m@gmail.com") {
-      if (password !== "Etch2410#") {
-        addToast("كلمة المرور غير صحيحة لحساب صاحب الـ Agency", "error");
-        return false;
-      }
-
-      const adminUser: User = {
-        id: "user_admin",
-        name: "Hesham M. (Agency Owner)",
-        email: "info.hesham.m@gmail.com",
-        role: "super_admin",
-        createdAt: "2026-01-01",
-      };
-
-      setCurrentUser(adminUser);
-
-      localStorage.setItem(
-        "fox_user",
-        JSON.stringify(adminUser)
-      );
-
-      addToast(
-        "مرحباً بك يا هشام (صاحب الـ Agency)",
-        "success"
-      );
-
-      return true;
-    }
-
     try {
       // Firebase Authentication is the source of truth.
       const credential =

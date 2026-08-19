@@ -3222,8 +3222,43 @@ async function startTelegramPolling() {
 // Start Polling Service Immediately
 startTelegramPolling();
 
+// Agency-management authorization.
+// These routes control the FOX AI AGENCY main Telegram bot,
+// not tenant/workspace Telegram bots.
+function requireSuperAdmin(
+  req: any,
+  res: any,
+  next: any
+) {
+  if (!req.foxAuth) {
+    return res.status(401).json({
+      success: false,
+      code: "NOT_AUTHENTICATED",
+      error: "Authentication required",
+    });
+  }
+
+  if (req.foxAuth.role !== "super_admin") {
+    console.warn(
+      `[FOX Security] Agency Telegram access blocked | UID=${req.foxAuth.uid} | Role=${req.foxAuth.role}`
+    );
+
+    return res.status(403).json({
+      success: false,
+      code: "SUPER_ADMIN_REQUIRED",
+      error: "Agency administrator access required",
+    });
+  }
+
+  return next();
+}
+
 // Telegram Toggle Active Status Endpoint
-app.post("/api/telegram/toggle-status", async (req, res) => {
+app.post(
+  "/api/telegram/toggle-status",
+  authenticateFirebaseRequest,
+  requireSuperAdmin,
+  async (req, res) => {
   const { enabled } = req.body;
   if (typeof enabled === "boolean") {
     isBotEnabled = enabled;
@@ -3250,7 +3285,11 @@ app.post("/api/telegram/toggle-status", async (req, res) => {
 });
 
 // Telegram Status Endpoint
-app.get("/api/telegram/status", async (req, res) => {
+app.get(
+  "/api/telegram/status",
+  authenticateFirebaseRequest,
+  requireSuperAdmin,
+  async (req, res) => {
   const data = await callTelegramApi("getMe");
   if (data && data.ok) {
     // Ensure polling is active if bot is enabled
@@ -3274,7 +3313,11 @@ app.get("/api/telegram/status", async (req, res) => {
 });
 
 // Telegram Set Token Endpoint
-app.post("/api/telegram/set-token", async (req, res) => {
+app.post(
+  "/api/telegram/set-token",
+  authenticateFirebaseRequest,
+  requireSuperAdmin,
+  async (req, res) => {
   const { token } = req.body;
   if (!token || typeof token !== "string") {
     return res.status(400).json({ error: "Token is required" });
@@ -3303,7 +3346,11 @@ app.post("/api/telegram/set-token", async (req, res) => {
 });
 
 // Direct Send Telegram Message
-app.post("/api/telegram/send-message", async (req, res) => {
+app.post(
+  "/api/telegram/send-message",
+  authenticateFirebaseRequest,
+  requireSuperAdmin,
+  async (req, res) => {
   const { chatId, text } = req.body;
   if (!chatId || !text) {
     return res.status(400).json({ error: "chatId and text are required" });

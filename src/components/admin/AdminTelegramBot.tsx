@@ -1,3 +1,4 @@
+import { authenticatedFetch } from "../../services/authenticatedFetch";
 import React, { useState, useEffect } from "react";
 import { useApp } from "../../context/AppContext";
 import { GmailIntegrationWidget } from "../common/GmailIntegrationWidget";
@@ -157,7 +158,7 @@ export const AdminTelegramBot: React.FC = () => {
     setChecking(true);
     try {
       const [resStatus, resConfig] = await Promise.all([
-        fetch("/api/telegram/status"),
+        authenticatedFetch("/api/telegram/status"),
         fetch("/api/telegram/bot-config"),
       ]);
 
@@ -189,7 +190,7 @@ export const AdminTelegramBot: React.FC = () => {
   const handleToggleBot = async () => {
     setTogglingStatus(true);
     try {
-      const res = await fetch("/api/telegram/toggle-status", {
+      const res = await authenticatedFetch("/api/telegram/toggle-status", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ enabled: !isBotEnabled }),
@@ -217,7 +218,7 @@ export const AdminTelegramBot: React.FC = () => {
 
     setSavingToken(true);
     try {
-      const res = await fetch("/api/telegram/set-token", {
+      const res = await authenticatedFetch("/api/telegram/set-token", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ token: token.trim() }),
@@ -299,7 +300,7 @@ export const AdminTelegramBot: React.FC = () => {
     setSendingTestMsg(true);
     setTestMsgStatus(null);
     try {
-      const res = await fetch("/api/telegram/send-message", {
+      const res = await authenticatedFetch("/api/telegram/send-message", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ chatId: testChatId.trim(), text: testMessage.trim() }),
