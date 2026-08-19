@@ -3406,6 +3406,493 @@ app.post(
   }
 );
 
+
+// ==========================================================
+// WHATSAPP CLOUD API - SECURE TENANT INTEGRATION
+// ==========================================================
+
+async function callWhatsAppGraphApi(
+  path: string,
+  accessToken: string,
+  options: RequestInit = {}
+) {
+  const cleanPath = String(path || "")
+    .replace(/^\/+/, "");
+
+  const response = await fetch(
+    `https://graph.facebook.com/v23.0/${cleanPath}`,
+    {
+      ...options,
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+        ...(options.headers || {}),
+      },
+    }
+  );
+
+  const data = await response
+    .json()
+    .catch(() => null);
+
+  return {
+    ok: response.ok,
+    status: response.status,
+    data,
+  };
+}
+
+// ----------------------------------------------------------
+// CONNECT WHATSAPP
+// ----------------------------------------------------------
+
+app.post(
+  "/api/whatsapp/workspace/:workspaceId/connect",
+  authenticateFirebaseRequest,
+  async (req: any, res) => {
+    try {
+      const workspace =
+        requireAuthenticatedWorkspace(
+          req,
+          res,
+          req.params.workspaceId
+        );
+
+      if (!workspace) {
+        return;
+      }
+
+      const access =
+        requireWorkspaceFeature(
+          workspace,
+          "whatsapp"
+        );
+
+      if (!access.allowed) {
+        return res
+          .status(access.status)
+          .json(access);
+      }
+
+      const accessToken =
+        String(
+          req.body?.accessToken || ""
+        ).trim();
+
+      const phoneNumberId =
+        String(
+          req.body?.phoneNumberId || ""
+        ).trim();
+
+      const businessAccountId =
+        String(
+          req.body?.businessAccountId || ""
+        ).trim();
+
+      if (!accessToken) {
+        return res.status(400).json({
+          success: false,
+          code:
+            "WHATSAPP_ACCESS_TOKEN_REQUIRED",
+          error:
+            "WhatsApp Access Token is required",
+        });
+      }
+
+      if (!phoneNumberId) {
+        return res.status(400).json({
+          success: false,
+          code:
+            "WHATSAPP_PHONE_NUMBER_ID_REQUIRED",
+          error:
+            "WhatsApp Phone Number ID is required",
+        });
+      }
+
+      // Validate the token + Phone Number ID against Meta.
+      const verification =
+        await callWhatsAppGraphApi(
+          `${encodeURIComponent(
+            phoneNumberId
+          )}?fields=id,display_phone_number,verified_name,quality_rating`,
+          accessToken
+        );
+
+      if (
+        !verification.ok ||
+        !verification.data?.id
+      ) {
+        console.warn(
+          `[WhatsApp] Meta verification failed | Workspace=${workspace.id} | HTTP=${verification.status}`
+        );
+
+        return res.status(400).json({
+          success: false,
+          code:
+            "WHATSAPP_META_VERIFICATION_FAILED",
+          error:
+            verification.data?.error?.message ||
+            "Could not verify WhatsApp credentials with Meta",
+        });
+      }
+
+      // Extra protection:
+      // Meta must return the same Phone Number ID.
+      if (
+        String(verification.data.id) !==
+        phoneNumberId
+      ) {
+        return res.status(400).json({
+          success: false,
+          code:
+            "WHATSAPP_PHONE_ID_MISMATCH",
+          error:
+            "Meta returned a different Phone Number ID",
+        });
+      }
+
+      const workspaceId =
+        String(workspace.id);
+
+      // Secret goes ONLY to encrypted vault.
+      await setWorkspaceSecret(
+        workspaceId,
+        "whatsappAccessToken",
+        accessToken
+      );
+
+      const now =
+        new Date().toISOString();
+
+      const safeMetadata = {
+        whatsappBotStatus:
+          "connected",
+
+        whatsappPhoneNumber:
+          verification.data
+            .display_phone_number ||
+          workspace.whatsappPhoneNumber ||
+          "",
+
+        whatsappPhoneNumberId:
+          phoneNumberId,
+
+        whatsappBusinessAccountId:
+          businessAccountId || null,
+
+        whatsappVerifiedName:
+          verification.data
+            .verified_name || null,
+
+        whatsappQualityRating:
+          verification.data
+            .quality_rating || null,
+
+        whatsappConnectedAt:
+          now,
+
+        updatedAt:
+          now,
+      };
+
+      // Store safe metadata only.
+      await adminDb
+        .collection("workspaces")
+        .doc(workspaceId)
+        .update(safeMetadata);
+
+      // Synchronize server memory.
+      const idx =
+        registeredWorkspacesStore
+          .findIndex(
+            (w) =>
+              String(w.id) ===
+              workspaceId
+          );
+
+      if (idx >= 0) {
+        registeredWorkspacesStore[idx] = {
+          ...registeredWorkspacesStore[idx],
+          ...safeMetadata,
+        };
+      }
+
+      console.log(
+        `🟢 [WhatsApp] Connected securely | Workspace=${workspaceId} | Phone=${verification.data.display_phone_number || phoneNumberId}`
+      );
+
+      return res.json({
+        success: true,
+        connected: true,
+
+        workspaceId,
+
+        phoneNumber:
+          verification.data
+            .display_phone_number ||
+          null,
+
+        phoneNumberId,
+
+        businessAccountId:
+          businessAccountId || null,
+
+        verifiedName:
+          verification.data
+            .verified_name || null,
+
+        qualityRating:
+          verification.data
+            .quality_rating || null,
+
+        hasAccessToken: true,
+      });
+
+    } catch (error: any) {
+      console.error(
+        "[WhatsApp Connect Error]",
+        error?.message || error
+      );
+
+      return res.status(500).json({
+        success: false,
+        code:
+          "WHATSAPP_CONNECT_FAILED",
+        error:
+          "Failed to connect WhatsApp",
+      });
+    }
+  }
+);
+
+// ----------------------------------------------------------
+// WHATSAPP STATUS
+// ----------------------------------------------------------
+
+app.get(
+  "/api/whatsapp/workspace/:workspaceId/status",
+  authenticateFirebaseRequest,
+  async (req: any, res) => {
+    try {
+      const workspace =
+        requireAuthenticatedWorkspace(
+          req,
+          res,
+          req.params.workspaceId
+        );
+
+      if (!workspace) {
+        return;
+      }
+
+      const access =
+        requireWorkspaceFeature(
+          workspace,
+          "whatsapp"
+        );
+
+      if (!access.allowed) {
+        return res
+          .status(access.status)
+          .json(access);
+      }
+
+      const workspaceId =
+        String(workspace.id);
+
+      const token =
+        await getWorkspaceSecret(
+          workspaceId,
+          "whatsappAccessToken"
+        );
+
+      const connected =
+        Boolean(token) &&
+        workspace.whatsappBotStatus ===
+          "connected";
+
+      return res.json({
+        success: true,
+        connected,
+        hasAccessToken:
+          Boolean(token),
+
+        workspaceId,
+
+        phoneNumber:
+          workspace.whatsappPhoneNumber ||
+          null,
+
+        phoneNumberId:
+          workspace
+            .whatsappPhoneNumberId ||
+          null,
+
+        businessAccountId:
+          workspace
+            .whatsappBusinessAccountId ||
+          null,
+
+        connectedAt:
+          workspace
+            .whatsappConnectedAt ||
+          null,
+      });
+
+    } catch (error: any) {
+      console.error(
+        "[WhatsApp Status Error]",
+        error?.message || error
+      );
+
+      return res.status(500).json({
+        success: false,
+        error:
+          "Failed to read WhatsApp status",
+      });
+    }
+  }
+);
+
+// ----------------------------------------------------------
+// DISCONNECT WHATSAPP
+// ----------------------------------------------------------
+
+app.delete(
+  "/api/whatsapp/workspace/:workspaceId/disconnect",
+  authenticateFirebaseRequest,
+  async (req: any, res) => {
+    try {
+      const workspace =
+        requireAuthenticatedWorkspace(
+          req,
+          res,
+          req.params.workspaceId
+        );
+
+      if (!workspace) {
+        return;
+      }
+
+      const access =
+        requireWorkspaceFeature(
+          workspace,
+          "whatsapp"
+        );
+
+      if (!access.allowed) {
+        return res
+          .status(access.status)
+          .json(access);
+      }
+
+      const workspaceId =
+        String(workspace.id);
+
+      // Permanently remove encrypted token.
+      await deleteWorkspaceSecret(
+        workspaceId,
+        "whatsappAccessToken"
+      );
+
+      const now =
+        new Date().toISOString();
+
+      await adminDb
+        .collection("workspaces")
+        .doc(workspaceId)
+        .update({
+          whatsappBotStatus:
+            "disconnected",
+
+          whatsappPhoneNumber:
+            FieldValue.delete(),
+
+          whatsappPhoneNumberId:
+            FieldValue.delete(),
+
+          whatsappBusinessAccountId:
+            FieldValue.delete(),
+
+          whatsappVerifiedName:
+            FieldValue.delete(),
+
+          whatsappQualityRating:
+            FieldValue.delete(),
+
+          whatsappConnectedAt:
+            FieldValue.delete(),
+
+          updatedAt:
+            now,
+        });
+
+      const idx =
+        registeredWorkspacesStore
+          .findIndex(
+            (w) =>
+              String(w.id) ===
+              workspaceId
+          );
+
+      if (idx >= 0) {
+        const safeWorkspace: any = {
+          ...registeredWorkspacesStore[idx],
+          whatsappBotStatus:
+            "disconnected",
+          updatedAt:
+            now,
+        };
+
+        delete safeWorkspace
+          .whatsappPhoneNumber;
+
+        delete safeWorkspace
+          .whatsappPhoneNumberId;
+
+        delete safeWorkspace
+          .whatsappBusinessAccountId;
+
+        delete safeWorkspace
+          .whatsappVerifiedName;
+
+        delete safeWorkspace
+          .whatsappQualityRating;
+
+        delete safeWorkspace
+          .whatsappConnectedAt;
+
+        registeredWorkspacesStore[idx] =
+          safeWorkspace;
+      }
+
+      console.log(
+        `🔴 [WhatsApp] Disconnected | Workspace=${workspaceId}`
+      );
+
+      return res.json({
+        success: true,
+        connected: false,
+        workspaceId,
+      });
+
+    } catch (error: any) {
+      console.error(
+        "[WhatsApp Disconnect Error]",
+        error?.message || error
+      );
+
+      return res.status(500).json({
+        success: false,
+        error:
+          "Failed to disconnect WhatsApp",
+      });
+    }
+  }
+);
+
+
+
 // Client workspace Telegram connection status.
 app.get(
   "/api/telegram/workspace/:workspaceId/status",

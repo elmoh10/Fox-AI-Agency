@@ -18,6 +18,7 @@ import {
   Link2,
   LogOut,
 } from "lucide-react";
+import { authenticatedFetch } from "../../services/authenticatedFetch";
 
 export const ClientWhatsAppQR: React.FC = () => {
   const { currentWorkspace, updateWhatsAppBotStatus, language } = useApp();
@@ -25,10 +26,26 @@ export const ClientWhatsAppQR: React.FC = () => {
 
   if (!currentWorkspace) return null;
 
-  const isConnected = currentWorkspace.whatsappBotStatus === "connected";
-  const connectedPhone = currentWorkspace.whatsappPhoneNumber || currentWorkspace.phone || "+20 100 123 4567";
+  const connectedPhone =
+    currentWorkspace.whatsappPhoneNumber ||
+    currentWorkspace.phone ||
+    "+20 100 123 4567";
 
   const [phoneInput, setPhoneInput] = useState(connectedPhone);
+  const [accessToken, setAccessToken] = useState("");
+  const [phoneNumberId, setPhoneNumberId] = useState(
+    currentWorkspace.whatsappPhoneNumberId || ""
+  );
+  const [businessAccountId, setBusinessAccountId] = useState(
+    currentWorkspace.whatsappBusinessAccountId || ""
+  );
+  const [isConnecting, setIsConnecting] = useState(false);
+  const [checkingStatus, setCheckingStatus] = useState(false);
+  const [serverConnected, setServerConnected] = useState(
+    currentWorkspace.whatsappBotStatus === "connected"
+  );
+
+  const isConnected = serverConnected;
   const [isScanning, setIsScanning] = useState(false);
   const [scanStep, setScanStep] = useState<number>(0); // 0 = idle, 1 = camera, 2 = authenticating, 3 = connected
   const [qrTimer, setQrTimer] = useState(60);
@@ -56,26 +73,155 @@ export const ClientWhatsAppQR: React.FC = () => {
     return () => clearInterval(interval);
   }, [isConnected, isScanning]);
 
-  // Handle Simulated QR Scan
-  const handleSimulateScan = () => {
-    setIsScanning(true);
-    setScanStep(1);
+  const fetchWhatsAppStatus = async () => {
+    setCheckingStatus(true);
 
-    setTimeout(() => {
-      setScanStep(2);
-    }, 1200);
+    try {
+      const res = await authenticatedFetch(
+        `/api/whatsapp/workspace/${currentWorkspace.id}/status`
+      );
 
-    setTimeout(() => {
-      setScanStep(3);
-      updateWhatsAppBotStatus(currentWorkspace.id, "connected", phoneInput.trim());
-      setIsScanning(false);
-    }, 2800);
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(
+          data.error || "Failed to read WhatsApp status"
+        );
+      }
+
+      setServerConnected(Boolean(data.connected));
+
+      if (data.phoneNumber) {
+        setPhoneInput(data.phoneNumber);
+      }
+
+      if (data.phoneNumberId) {
+        setPhoneNumberId(data.phoneNumberId);
+      }
+
+      if (data.businessAccountId) {
+        setBusinessAccountId(data.businessAccountId);
+      }
+
+    } catch (error) {
+      console.error("WhatsApp status failed:", error);
+      setServerConnected(false);
+    } finally {
+      setCheckingStatus(false);
+    }
   };
 
-  const handleDisconnect = () => {
-    if (confirm(isAr ? "هل أنت تأكد من قطع ربط الواتساب مع البوت؟" : "Are you sure you want to disconnect WhatsApp?")) {
-      updateWhatsAppBotStatus(currentWorkspace.id, "disconnected");
-      setScanStep(0);
+  useEffect(() => {
+    fetchWhatsAppStatus();
+  }, [currentWorkspace.id]);
+
+  const handleConnectWhatsApp = async (
+    e: React.FormEvent
+  ) => {
+    e.preventDefault();
+
+    if (!accessToken.trim() || !phoneNumberId.trim()) {
+      alert(
+        isAr
+          ? "يرجى إدخال Access Token و Phone Number ID."
+          : "Please enter Access Token and Phone Number ID."
+      );
+      return;
+    }
+
+    setIsConnecting(true);
+
+    try {
+      const res = await authenticatedFetch(
+        `/api/whatsapp/workspace/${currentWorkspace.id}/connect`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            accessToken: accessToken.trim(),
+            phoneNumberId: phoneNumberId.trim(),
+            businessAccountId:
+              businessAccountId.trim(),
+          }),
+        }
+      );
+
+      const data = await res.json();
+
+      if (!res.ok || !data.success) {
+        throw new Error(
+          data.error || "WhatsApp connection failed"
+        );
+      }
+
+      setServerConnected(true);
+
+      if (data.phoneNumber) {
+        setPhoneInput(data.phoneNumber);
+      }
+
+      setAccessToken("");
+
+      alert(
+        isAr
+          ? "تم التحقق من حساب WhatsApp وربطه بنجاح."
+          : "WhatsApp account verified and connected successfully."
+      );
+
+    } catch (error: any) {
+      alert(
+        error?.message ||
+        (isAr
+          ? "تعذر ربط WhatsApp."
+          : "Could not connect WhatsApp.")
+      );
+    } finally {
+      setIsConnecting(false);
+    }
+  };
+
+  const handleDisconnect = async () => {
+    const approved = confirm(
+      isAr
+        ? "هل تريد قطع ربط WhatsApp فعلاً؟"
+        : "Are you sure you want to disconnect WhatsApp?"
+    );
+
+    if (!approved) return;
+
+    try {
+      const res = await authenticatedFetch(
+        `/api/whatsapp/workspace/${currentWorkspace.id}/disconnect`,
+        {
+          method: "DELETE",
+        }
+      );
+
+      const data = await res.json();
+
+      if (!res.ok || !data.success) {
+        throw new Error(
+          data.error || "WhatsApp disconnect failed"
+        );
+      }
+
+      setServerConnected(false);
+      setAccessToken("");
+      setPhoneNumberId("");
+      setBusinessAccountId("");
+
+      alert(
+        isAr
+          ? "تم قطع ربط WhatsApp."
+          : "WhatsApp disconnected."
+      );
+
+    } catch (error: any) {
+      alert(
+        error?.message ||
+        (isAr
+          ? "تعذر قطع ربط WhatsApp."
+          : "Could not disconnect WhatsApp.")
+      );
     }
   };
 
@@ -91,7 +237,7 @@ export const ClientWhatsAppQR: React.FC = () => {
     setIsBotResponding(true);
 
     try {
-      const res = await fetch("/api/ai/chat", {
+      const res = await authenticatedFetch("/api/ai/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -143,7 +289,7 @@ export const ClientWhatsAppQR: React.FC = () => {
           <div className="flex items-center gap-2">
             <span className="flex items-center gap-1.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-3 py-1 text-xs font-bold">
               <MessageCircle className="h-4 w-4 text-emerald-400" />
-              {isAr ? "ربط الواتساب المباشر عبر QR Code" : "Direct WhatsApp Business Web QR Connection"}
+              {isAr ? "ربط WhatsApp Cloud API" : "Official WhatsApp Business Cloud API"}
             </span>
             {isConnected ? (
               <span className="flex items-center gap-1.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-3 py-1 text-xs font-bold">
@@ -157,7 +303,7 @@ export const ClientWhatsAppQR: React.FC = () => {
             )}
           </div>
           <h1 className="text-2xl font-black sm:text-3xl">
-            {isAr ? "تفعيل واتساب الأعمال بالـ QR Code" : "WhatsApp QR Code Integration"}
+            {isAr ? "تفعيل WhatsApp Business Cloud API" : "WhatsApp Cloud API Integration"}
           </h1>
           <p className="text-xs sm:text-sm text-slate-300 font-medium max-w-2xl">
             {isAr
@@ -209,105 +355,132 @@ export const ClientWhatsAppQR: React.FC = () => {
           </div>
 
           {!isConnected ? (
-            /* DISCONNECTED / SCANNING STATE */
-            <div className="flex flex-col items-center justify-center py-4 space-y-6">
-              {/* Phone Input configuration before/during scan */}
-              <div className="w-full max-w-sm space-y-1 text-xs">
-                <label className="font-bold text-slate-700 dark:text-slate-300 block">
-                  {isAr ? "رقم هاتف الواتساب المربوط:" : "Connected WhatsApp Phone Number:"}
-                </label>
-                <div className="relative">
-                  <Smartphone className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+            <form
+              onSubmit={handleConnectWhatsApp}
+              className="space-y-5"
+            >
+              <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/5 p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <ShieldCheck className="h-5 w-5 text-emerald-500" />
+                  <h4 className="text-sm font-black text-slate-900 dark:text-white">
+                    {isAr
+                      ? "ربط WhatsApp Cloud API الرسمي"
+                      : "Connect Official WhatsApp Cloud API"}
+                  </h4>
+                </div>
+
+                <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                  {isAr
+                    ? "أدخل بيانات WhatsApp Business من Meta. سيتم التحقق منها مباشرةً ثم تخزين الـ Access Token بشكل مشفّر داخل FOX ولن يتم عرضه مرة أخرى."
+                    : "Enter your WhatsApp Business credentials from Meta. FOX will verify them and store the access token encrypted server-side."}
+                </p>
+              </div>
+
+              <div className="space-y-4">
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                    Access Token
+                  </label>
+
+                  <input
+                    type="password"
+                    value={accessToken}
+                    onChange={(e) =>
+                      setAccessToken(e.target.value)
+                    }
+                    placeholder="EAAG..."
+                    autoComplete="off"
+                    className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 font-mono text-xs text-slate-900 dark:border-slate-800 dark:bg-slate-800 dark:text-white focus:outline-none focus:border-emerald-500"
+                    required
+                  />
+
+                  <p className="text-[10px] text-slate-400">
+                    {isAr
+                      ? "لن يتم حفظ التوكن في المتصفح أو داخل Workspace العادي."
+                      : "The token will not be stored in the browser or normal workspace data."}
+                  </p>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                    Phone Number ID
+                  </label>
+
                   <input
                     type="text"
-                    value={phoneInput}
-                    onChange={(e) => setPhoneInput(e.target.value)}
-                    placeholder="+20 100 000 0000"
-                    className="w-full rounded-xl border border-slate-200 bg-slate-50 pl-10 pr-4 py-2.5 font-mono text-xs font-bold text-slate-900 dark:border-slate-800 dark:bg-slate-800 dark:text-white focus:outline-none focus:border-emerald-500"
+                    value={phoneNumberId}
+                    onChange={(e) =>
+                      setPhoneNumberId(e.target.value)
+                    }
+                    placeholder="123456789012345"
+                    className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 font-mono text-xs text-slate-900 dark:border-slate-800 dark:bg-slate-800 dark:text-white focus:outline-none focus:border-emerald-500"
+                    required
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                    WhatsApp Business Account ID
+                  </label>
+
+                  <input
+                    type="text"
+                    value={businessAccountId}
+                    onChange={(e) =>
+                      setBusinessAccountId(e.target.value)
+                    }
+                    placeholder="123456789012345"
+                    className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 font-mono text-xs text-slate-900 dark:border-slate-800 dark:bg-slate-800 dark:text-white focus:outline-none focus:border-emerald-500"
                   />
                 </div>
               </div>
 
-              {/* QR Display Card */}
-              <div className="relative flex flex-col items-center justify-center p-6 bg-slate-900 rounded-3xl border-2 border-emerald-500/30 shadow-2xl overflow-hidden group">
-                {/* Laser animation when scanning */}
-                {isScanning && (
-                  <div className="absolute inset-0 z-20 pointer-events-none">
-                    <div className="w-full h-1 bg-gradient-to-r from-transparent via-emerald-400 to-transparent shadow-[0_0_15px_#10b981] animate-bounce" />
-                  </div>
+              <button
+                type="submit"
+                disabled={
+                  isConnecting ||
+                  checkingStatus ||
+                  !accessToken.trim() ||
+                  !phoneNumberId.trim()
+                }
+                className="w-full py-3.5 rounded-2xl bg-gradient-to-r from-emerald-600 to-teal-600 text-white font-black text-xs shadow-lg shadow-emerald-600/25 hover:from-emerald-500 hover:to-teal-500 transition flex items-center justify-center gap-2 disabled:opacity-50"
+              >
+                {isConnecting ? (
+                  <RefreshCw className="h-4 w-4 animate-spin" />
+                ) : (
+                  <ShieldCheck className="h-4 w-4" />
                 )}
 
-                {/* SVG QR CODE */}
-                <div className="relative p-4 bg-white rounded-2xl shadow-inner">
-                  <svg className="w-48 h-48" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    {/* Frame Outer Corner Squares */}
-                    <rect x="5" y="5" width="25" height="25" rx="3" fill="#0f172a" />
-                    <rect x="9" y="9" width="17" height="17" rx="2" fill="white" />
-                    <rect x="13" y="13" width="9" height="9" fill="#10b981" />
+                <span>
+                  {isConnecting
+                    ? isAr
+                      ? "جاري التحقق من Meta..."
+                      : "Verifying with Meta..."
+                    : isAr
+                    ? "تحقق واربط WhatsApp"
+                    : "Verify & Connect WhatsApp"}
+                </span>
+              </button>
 
-                    <rect x="70" y="5" width="25" height="25" rx="3" fill="#0f172a" />
-                    <rect x="74" y="9" width="17" height="17" rx="2" fill="white" />
-                    <rect x="78" y="13" width="9" height="9" fill="#10b981" />
+              <button
+                type="button"
+                onClick={fetchWhatsAppStatus}
+                disabled={checkingStatus}
+                className="w-full py-2.5 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-bold text-xs flex items-center justify-center gap-2"
+              >
+                <RefreshCw
+                  className={`h-3.5 w-3.5 ${
+                    checkingStatus ? "animate-spin" : ""
+                  }`}
+                />
 
-                    <rect x="5" y="70" width="25" height="25" rx="3" fill="#0f172a" />
-                    <rect x="9" y="74" width="17" height="17" rx="2" fill="white" />
-                    <rect x="13" y="78" width="9" height="9" fill="#10b981" />
-
-                    {/* QR Code Pixel Matrix Simulation */}
-                    <path d="M35 5h10v5H35zM50 5h15v5H50zM35 15h5v15h-5zM45 20h10v5H45zM60 15h5v10h-5zM35 35h30v5H35zM5 35h25v5H5zM5 45h10v10H5zM20 45h15v5H20zM40 45h20v5H40zM65 45h15v10H65zM85 35h10v20H85zM5 60h20v5H5zM30 55h10v15H30zM45 55h15v5H45zM65 60h10v10H65zM80 60h15v5H80zM35 75h10v20H35zM50 75h20v5H50zM75 75h20v5H75zM50 85h10v10H50zM65 90h15v5H65zM85 85h10v10H85z" fill="#0f172a" />
-
-                    {/* Center WhatsApp Icon Badge */}
-                    <circle cx="50" cy="50" r="12" fill="#10b981" />
-                    <circle cx="50" cy="50" r="10" fill="white" />
-                    <path d="M47 44c-1.6 0-3 1.4-3 3 0 1 .5 2 1.3 2.5L45 53l3.6-.9c.4.2.9.3 1.4.3 1.6 0 3-1.4 3-3s-1.4-3.4-3-3.4z" fill="#10b981" />
-                  </svg>
-
-                  {/* Overlay scanning step feedback */}
-                  {isScanning && (
-                    <div className="absolute inset-0 bg-slate-950/85 backdrop-blur-sm rounded-2xl flex flex-col items-center justify-center p-4 text-center space-y-2 animate-fade-in text-white">
-                      <RefreshCw className="h-8 w-8 text-emerald-400 animate-spin" />
-                      <p className="font-extrabold text-xs text-emerald-300">
-                        {scanStep === 1 && (isAr ? "جاري التعرف على الكاميرا..." : "Detecting device...")}
-                        {scanStep === 2 && (isAr ? "جاري الاقتران وتأكيد الهاتف..." : "Authenticating session...")}
-                        {scanStep === 3 && (isAr ? "تم الربط وتنشيط البوت! 🎉" : "Connected successfully!")}
-                      </p>
-                    </div>
-                  )}
-                </div>
-
-                <div className="mt-4 text-center space-y-1">
-                  <p className="text-xs font-extrabold text-white flex items-center justify-center gap-1.5">
-                    <span>{isAr ? "رمز QR نشط ومباشر" : "Live QR Code Active"}</span>
-                  </p>
-
-                  <p className="text-[11px] text-slate-400">
-                    {isAr ? `يتجدد الرمز تلقائياً خلال: ${qrTimer} ثانية` : `Auto-refreshes in: ${qrTimer}s`}
-                  </p>
-                </div>
-              </div>
-
-              {/* Action Buttons: Simulate QR Scan */}
-              <div className="w-full max-w-sm space-y-3">
-                <button
-                  type="button"
-                  onClick={handleSimulateScan}
-                  disabled={isScanning}
-                  className="w-full py-3.5 px-4 rounded-2xl bg-gradient-to-r from-emerald-600 to-teal-600 text-white font-black text-xs shadow-lg shadow-emerald-600/25 hover:from-emerald-500 hover:to-teal-500 transition flex items-center justify-center gap-2 group disabled:opacity-50"
-                >
-                  <Sparkles className="h-4 w-4 text-amber-300 group-hover:rotate-12 transition-transform" />
-                  <span>{isAr ? "مسح ضوئي واقتران الآن (Simulate Scan)" : "Simulate QR Scan & Connect"}</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setQrTimer(60)}
-                  className="w-full py-2.5 px-4 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-bold text-xs hover:bg-slate-200 dark:hover:bg-slate-700 transition flex items-center justify-center gap-2"
-                >
-                  <RefreshCw className="h-3.5 w-3.5" />
-                  <span>{isAr ? "توليد رمز QR جديد" : "Refresh QR Code"}</span>
-                </button>
-              </div>
-            </div>
+                <span>
+                  {isAr
+                    ? "تحديث حالة الاتصال"
+                    : "Refresh Connection Status"}
+                </span>
+              </button>
+            </form>
           ) : (
             /* CONNECTED STATE PANEL */
             <div className="space-y-6 py-2">

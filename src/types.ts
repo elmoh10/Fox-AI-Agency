@@ -58,6 +58,8 @@ export interface Workspace {
   telegramBotStatus?: 'connected' | 'disconnected' | 'pending';
   whatsappBotStatus?: 'connected' | 'disconnected' | 'pending';
   whatsappPhoneNumber?: string;
+  whatsappPhoneNumberId?: string;
+  whatsappBusinessAccountId?: string;
   whatsappConnectedAt?: string;
   registrationSource?: string;
   googleSheetsAccessToken?: string;
