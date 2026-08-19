@@ -46,9 +46,6 @@ export const ClientWhatsAppQR: React.FC = () => {
   );
 
   const isConnected = serverConnected;
-  const [isScanning, setIsScanning] = useState(false);
-  const [scanStep, setScanStep] = useState<number>(0); // 0 = idle, 1 = camera, 2 = authenticating, 3 = connected
-  const [qrTimer, setQrTimer] = useState(60);
   const [copiedUrl, setCopiedUrl] = useState(false);
 
   // Live Test Sandbox state
@@ -63,15 +60,6 @@ export const ClientWhatsAppQR: React.FC = () => {
     },
   ]);
   const [isBotResponding, setIsBotResponding] = useState(false);
-
-  // QR Timer Countdown
-  useEffect(() => {
-    if (isConnected || isScanning) return;
-    const interval = setInterval(() => {
-      setQrTimer((prev) => (prev <= 1 ? 60 : prev - 1));
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [isConnected, isScanning]);
 
   const fetchWhatsAppStatus = async () => {
     setCheckingStatus(true);
@@ -298,7 +286,7 @@ export const ClientWhatsAppQR: React.FC = () => {
               </span>
             ) : (
               <span className="flex items-center gap-1.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 px-3 py-1 text-xs font-bold">
-                {isAr ? "في انتظار مسح رمز QR" : "Awaiting QR Scan"}
+                {isAr ? "في انتظار ربط حساب Meta" : "Awaiting Meta Connection"}
               </span>
             )}
           </div>
@@ -307,8 +295,8 @@ export const ClientWhatsAppQR: React.FC = () => {
           </h1>
           <p className="text-xs sm:text-sm text-slate-300 font-medium max-w-2xl">
             {isAr
-              ? `قم بمسح رمز الـ QR عبر تطبيق الواتساب على هاتفك لربط حساب النشاط التجاري "${currentWorkspace.name}" وتفعيل بوت الذكاء الاصطناعي للرد الآلي فوراً.`
-              : `Scan the QR code using WhatsApp on your phone to pair your business "${currentWorkspace.name}" and activate AI auto-responses.`}
+              ? `اربط حساب WhatsApp Business الخاص بالنشاط "${currentWorkspace.name}" باستخدام بيانات Meta Cloud API لتفعيل الرد الآلي بالذكاء الاصطناعي.`
+              : `Connect the WhatsApp Business account for "${currentWorkspace.name}" using Meta Cloud API credentials to activate AI auto-replies.`}
           </p>
         </div>
 
@@ -324,19 +312,19 @@ export const ClientWhatsAppQR: React.FC = () => {
       </div>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
-        {/* Main Panel: QR Scanner & Status */}
+        {/* Main Panel: WhatsApp Cloud API & Status */}
         <div className="lg:col-span-7 rounded-3xl border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-800 dark:bg-slate-900 space-y-6">
           <div className="flex items-center justify-between pb-4 border-b border-slate-100 dark:border-slate-800">
             <div className="flex items-center gap-3">
               <div className="p-3 rounded-2xl bg-emerald-500/10 text-emerald-500">
-                <QrCode className="h-6 w-6" />
+                <Link2 className="h-6 w-6" />
               </div>
               <div>
                 <h3 className="text-base font-extrabold text-slate-900 dark:text-white">
-                  {isAr ? "رمز الاقتران الضوئي (WhatsApp Web QR)" : "WhatsApp Web QR Scanner"}
+                  {isAr ? "إعدادات WhatsApp Cloud API" : "WhatsApp Cloud API Connection"}
                 </h3>
                 <p className="text-xs text-slate-500 dark:text-slate-400">
-                  {isAr ? "امسح الكود بكاميرا الواتساب لربط الحساب وتفعيل البوت الذكي" : "Scan QR code with WhatsApp camera to activate AI bot"}
+                  {isAr ? "أدخل بيانات Meta الرسمية للتحقق من الحساب وتفعيل البوت الذكي" : "Enter your official Meta credentials to verify the account and activate the AI bot"}
                 </p>
               </div>
             </div>
@@ -507,7 +495,7 @@ export const ClientWhatsAppQR: React.FC = () => {
 
                   <div className="p-3 rounded-xl bg-white dark:bg-slate-900 border border-emerald-200 dark:border-emerald-900/50">
                     <span className="text-[10px] text-slate-400 block font-sans">{isAr ? "جلسة الواتساب:" : "Session Type:"}</span>
-                    <span className="font-bold text-emerald-600 dark:text-emerald-400 block">FOX AI WhatsApp Web Client</span>
+                    <span className="font-bold text-emerald-600 dark:text-emerald-400 block">FOX AI WhatsApp Cloud API</span>
                   </div>
                 </div>
               </div>
@@ -516,11 +504,11 @@ export const ClientWhatsAppQR: React.FC = () => {
               <div className="flex flex-col sm:flex-row gap-3">
                 <button
                   type="button"
-                  onClick={handleSimulateScan}
+                  onClick={fetchWhatsAppStatus}
                   className="flex-1 py-3 px-4 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 font-bold text-xs hover:bg-slate-200 dark:hover:bg-slate-700 transition flex items-center justify-center gap-2 border border-slate-200 dark:border-slate-700"
                 >
                   <RefreshCw className="h-4 w-4" />
-                  <span>{isAr ? "إعادة مسح QR جديد" : "Re-scan New QR"}</span>
+                  <span>{isAr ? "تحديث حالة الاتصال" : "Refresh Connection Status"}</span>
                 </button>
 
                 <button
@@ -567,7 +555,7 @@ export const ClientWhatsAppQR: React.FC = () => {
             <div className="flex items-center gap-2 border-b border-slate-100 dark:border-slate-800 pb-3">
               <HelpCircle className="h-5 w-5 text-emerald-500" />
               <h3 className="text-sm font-extrabold text-slate-900 dark:text-white">
-                {isAr ? "خطوات ربط الواتساب عبر الـ QR Code:" : "How to pair WhatsApp with QR Code:"}
+                {isAr ? "خطوات ربط WhatsApp Cloud API:" : "How to connect WhatsApp Cloud API:"}
               </h3>
             </div>
 
@@ -579,10 +567,10 @@ export const ClientWhatsAppQR: React.FC = () => {
                 </span>
                 <div>
                   <p className="font-bold text-slate-900 dark:text-white">
-                    {isAr ? "افتح تطبيق WhatsApp على هاتفك المحمول" : "Open WhatsApp on your smartphone"}
+                    {isAr ? "افتح Meta for Developers / WhatsApp Business" : "Open Meta for Developers / WhatsApp Business"}
                   </p>
                   <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
-                    {isAr ? "سواء واتساب العادي أو WhatsApp Business" : "WhatsApp Messenger or WhatsApp Business"}
+                    {isAr ? "اختر تطبيق Meta والنشاط التجاري المرتبط بحساب WhatsApp Business" : "Select your Meta app and linked WhatsApp Business account"}
                   </p>
                 </div>
               </div>
@@ -594,10 +582,10 @@ export const ClientWhatsAppQR: React.FC = () => {
                 </span>
                 <div>
                   <p className="font-bold text-slate-900 dark:text-white">
-                    {isAr ? "ادخل على الإعدادات ⚙️ -> الأجهزة المرتبطة" : "Go to Settings ⚙️ -> Linked Devices"}
+                    {isAr ? "احصل على Access Token و Phone Number ID" : "Get your Access Token and Phone Number ID"}
                   </p>
                   <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
-                    {isAr ? "اضغط على زر (ربط جهاز / Link a Device)" : "Tap 'Link a Device' button"}
+                    {isAr ? "أدخل البيانات في FOX ثم اضغط تحقق واربط WhatsApp" : "Enter the credentials in FOX and click Verify & Connect WhatsApp"}
                   </p>
                 </div>
               </div>
@@ -609,10 +597,10 @@ export const ClientWhatsAppQR: React.FC = () => {
                 </span>
                 <div>
                   <p className="font-bold text-slate-900 dark:text-white">
-                    {isAr ? "وجّه كاميرا الهاتف نحو رمز الـ QR بالجهة المقابلة" : "Point camera at the QR code on screen"}
+                    {isAr ? "سيقوم FOX بالتحقق من البيانات مباشرة مع Meta" : "FOX will verify the credentials directly with Meta"}
                   </p>
                   <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
-                    {isAr ? "بمجرد القراءة سينشط بوت الذكاء الاصطناعي مباشرة!" : "Once scanned, AI agent activates automatically!"}
+                    {isAr ? "بعد نجاح التحقق سيتم تشفير التوكن وتفعيل الاتصال." : "After successful verification, the token is encrypted and the connection is activated."}
                   </p>
                 </div>
               </div>
