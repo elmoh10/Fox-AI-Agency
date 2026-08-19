@@ -3068,22 +3068,63 @@ async function handleWorkspaceTelegramUpdate(
         ? "وسط"
         : "رائع جداً";
 
-    registeredServiceRatingsStore.unshift({
-      id: `rat_ws_${Date.now()}`,
+    const ratingId = `rat_ws_${Date.now()}`;
+
+    const customerName =
+      [userInfo.first_name, userInfo.last_name]
+        .filter(Boolean)
+        .join(" ") || "Telegram Customer";
+
+    const createdAt = new Date()
+      .toISOString()
+      .replace("T", " ")
+      .substring(0, 16);
+
+    const newRating = {
+      id: ratingId,
       workspaceId: String(workspace.id),
-      customerName:
-        [userInfo.first_name, userInfo.last_name]
-          .filter(Boolean)
-          .join(" ") || "Telegram Customer",
+      customerName,
       customerPhone: "",
-      channel: "telegram",
+      channel: "telegram" as const,
       rating: ratingValue,
       feedback,
-      createdAt: new Date()
-        .toISOString()
-        .replace("T", " ")
-        .substring(0, 16),
-    });
+      createdAt,
+    };
+
+    // -------------------------------------------------------
+    // Persist tenant rating in Firestore.
+    //
+    // The client dashboard already subscribes to the global
+    // "serviceRatings" collection and scopes records using
+    // workspaceId, so this becomes live and tenant-isolated.
+    // -------------------------------------------------------
+    try {
+      await adminDb
+        .collection("serviceRatings")
+        .doc(ratingId)
+        .set(newRating);
+
+      console.log(
+        `⭐ [FOX Rating Firestore] Saved | Workspace=${workspace.id} | Rating=${ratingValue}/5 | ID=${ratingId}`
+      );
+    } catch (ratingError) {
+      console.error(
+        `❌ [FOX Rating Firestore] Save failed | Workspace=${workspace.id}`,
+        ratingError
+      );
+
+      await callWorkspaceTelegramApi(token, "sendMessage", {
+        chat_id: chatId,
+        text:
+          "حدث خطأ أثناء تسجيل التقييم. من فضلك حاول مرة أخرى بعد قليل.",
+      });
+
+      return;
+    }
+
+    // Keep legacy runtime store synchronized temporarily
+    // because existing agency endpoints still read from it.
+    registeredServiceRatingsStore.unshift(newRating);
 
     workspaceTelegramRatingSessions.delete(sessionKey);
 
