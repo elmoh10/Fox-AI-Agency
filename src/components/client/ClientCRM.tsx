@@ -28,6 +28,11 @@ import {
   Send,
   X,
   FileSpreadsheet,
+  Brain,
+  Target,
+  CalendarCheck,
+  ExternalLink,
+  Activity,
 } from "lucide-react";
 
 export const ClientCRM: React.FC = () => {
@@ -238,6 +243,32 @@ export const ClientCRM: React.FC = () => {
     }
   };
 
+  const openLeadConversation = (lead: CustomerLead) => {
+    const conversationId = (lead as any).conversationId;
+
+    if (!conversationId) {
+      addToast(
+        "No linked conversation found for this customer.",
+        "info"
+      );
+      return;
+    }
+
+    sessionStorage.setItem(
+      "fox_open_conversation_id",
+      String(conversationId)
+    );
+
+    window.dispatchEvent(
+      new CustomEvent("fox:navigate", {
+        detail: {
+          tab: "client_unified_inbox",
+          conversationId,
+        },
+      })
+    );
+  };
+
   const handleExportCSV = () => {
     const headers = "Name,Phone,Email,Channel,Status,Last Interaction,Notes\n";
     const rows = leads
@@ -420,46 +451,227 @@ export const ClientCRM: React.FC = () => {
         </div>
       </div>
 
-      {/* Customer Detail Drawer Modal */}
+      {/* Customer 360 Detail Drawer */}
       {selectedLead && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-sm">
-          <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-800 dark:bg-slate-900">
-            <div className="flex items-center justify-between border-b border-slate-100 pb-3 dark:border-slate-800">
-              <h3 className="text-base font-extrabold text-slate-900 dark:text-white">
-                CRM Record Details
-              </h3>
+          <div className="w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-800 dark:bg-slate-900">
+
+            <div className="flex items-start justify-between border-b border-slate-100 pb-4 dark:border-slate-800">
+              <div>
+                <div className="flex items-center gap-2">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-orange-500/10 text-orange-500">
+                    <Users className="h-5 w-5" />
+                  </div>
+
+                  <div>
+                    <h3 className="text-lg font-black text-slate-900 dark:text-white">
+                      {selectedLead.name || "Customer"}
+                    </h3>
+
+                    <p className="text-[11px] text-slate-400">
+                      FOX Customer 360°
+                    </p>
+                  </div>
+                </div>
+              </div>
+
               <button
                 onClick={() => setSelectedLead(null)}
-                className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+                className="rounded-xl p-2 text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
               >
                 <X className="h-5 w-5" />
               </button>
             </div>
 
-            <div className="mt-4 space-y-3 text-xs">
-              <div>
-                <span className="text-slate-400 font-medium">Name:</span>
-                <p className="text-sm font-extrabold text-slate-900 dark:text-white">{selectedLead.name}</p>
-              </div>
+            {/* Contact */}
+            <div className="mt-5 grid gap-3 sm:grid-cols-3">
 
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <span className="text-slate-400 font-medium">Phone:</span>
-                  <p className="font-mono font-bold text-slate-800 dark:text-slate-200">{selectedLead.phone}</p>
+              <div className="rounded-2xl bg-slate-50 p-4 dark:bg-slate-800/60">
+                <div className="mb-2 flex items-center gap-2 text-slate-400">
+                  <Phone className="h-4 w-4" />
+                  <span className="text-[10px] font-bold uppercase">
+                    Phone
+                  </span>
                 </div>
-                <div>
-                  <span className="text-slate-400 font-medium">Channel:</span>
-                  <p className="font-bold text-emerald-600 dark:text-emerald-400">{selectedLead.channel}</p>
-                </div>
-              </div>
 
-              <div>
-                <span className="text-slate-400 font-medium">Notes & AI Interaction Summary:</span>
-                <p className="mt-1 rounded-xl bg-slate-50 p-3 text-slate-700 dark:bg-slate-800 dark:text-slate-300">
-                  {selectedLead.notes || "Customer engaged with Fox AI Agent. Inquired about pricing and appointments."}
+                <p className="font-mono text-xs font-bold text-slate-800 dark:text-slate-100">
+                  {selectedLead.phone || "Not captured"}
                 </p>
               </div>
+
+              <div className="rounded-2xl bg-slate-50 p-4 dark:bg-slate-800/60">
+                <div className="mb-2 flex items-center gap-2 text-slate-400">
+                  <MessageSquare className="h-4 w-4" />
+                  <span className="text-[10px] font-bold uppercase">
+                    Channel
+                  </span>
+                </div>
+
+                <p className="text-xs font-extrabold text-emerald-500">
+                  {selectedLead.channel || "Unknown"}
+                </p>
+              </div>
+
+              <div className="rounded-2xl bg-slate-50 p-4 dark:bg-slate-800/60">
+                <div className="mb-2 flex items-center gap-2 text-slate-400">
+                  <Target className="h-4 w-4" />
+                  <span className="text-[10px] font-bold uppercase">
+                    CRM Stage
+                  </span>
+                </div>
+
+                <p className="text-xs font-extrabold text-orange-500">
+                  {selectedLead.status}
+                </p>
+              </div>
+
             </div>
+
+            {/* AI Intelligence */}
+            <div className="mt-5 rounded-2xl border border-purple-500/20 bg-purple-500/5 p-4">
+              <div className="mb-4 flex items-center gap-2">
+                <Brain className="h-5 w-5 text-purple-500" />
+
+                <div>
+                  <p className="text-xs font-black text-slate-900 dark:text-white">
+                    FOX AI Customer Intelligence
+                  </p>
+                  <p className="text-[10px] text-slate-400">
+                    Automatically generated from customer interactions
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-2">
+
+                <div>
+                  <span className="text-[10px] font-bold uppercase text-slate-400">
+                    Last Intent
+                  </span>
+
+                  <p className="mt-1 text-xs font-extrabold text-purple-500">
+                    {(selectedLead as any).lastIntent || "general"}
+                  </p>
+                </div>
+
+                <div>
+                  <span className="text-[10px] font-bold uppercase text-slate-400">
+                    Last Interaction
+                  </span>
+
+                  <p className="mt-1 font-mono text-[11px] text-slate-700 dark:text-slate-300">
+                    {selectedLead.lastInteraction || "—"}
+                  </p>
+                </div>
+
+              </div>
+
+              <div className="mt-4">
+                <span className="text-[10px] font-bold uppercase text-slate-400">
+                  Last Customer Message
+                </span>
+
+                <div className="mt-2 rounded-xl bg-white p-3 text-xs leading-relaxed text-slate-700 shadow-sm dark:bg-slate-900 dark:text-slate-200">
+                  {(selectedLead as any).lastMessage ||
+                    "No customer message captured yet."}
+                </div>
+              </div>
+            </div>
+
+            {/* Conversion */}
+            {(selectedLead as any).conversionType && (
+              <div className="mt-4 rounded-2xl border border-emerald-500/20 bg-emerald-500/5 p-4">
+
+                <div className="flex items-center gap-2">
+                  <CalendarCheck className="h-5 w-5 text-emerald-500" />
+
+                  <div>
+                    <p className="text-xs font-black text-emerald-600 dark:text-emerald-400">
+                      Customer Converted
+                    </p>
+
+                    <p className="text-[10px] text-slate-400">
+                      FOX detected a successful business conversion
+                    </p>
+                  </div>
+                </div>
+
+                <div className="mt-4 grid gap-3 sm:grid-cols-3">
+
+                  <div>
+                    <span className="text-[10px] font-bold uppercase text-slate-400">
+                      Type
+                    </span>
+
+                    <p className="mt-1 text-xs font-bold text-slate-800 dark:text-white">
+                      {(selectedLead as any).conversionType}
+                    </p>
+                  </div>
+
+                  <div>
+                    <span className="text-[10px] font-bold uppercase text-slate-400">
+                      Conversion ID
+                    </span>
+
+                    <p className="mt-1 break-all font-mono text-[10px] text-slate-600 dark:text-slate-300">
+                      {(selectedLead as any).lastConversionId || "—"}
+                    </p>
+                  </div>
+
+                  <div>
+                    <span className="text-[10px] font-bold uppercase text-slate-400">
+                      Converted At
+                    </span>
+
+                    <p className="mt-1 font-mono text-[10px] text-slate-600 dark:text-slate-300">
+                      {(selectedLead as any).convertedAt || "—"}
+                    </p>
+                  </div>
+
+                </div>
+              </div>
+            )}
+
+            {/* Notes */}
+            <div className="mt-4 rounded-2xl bg-slate-50 p-4 dark:bg-slate-800/60">
+              <div className="mb-2 flex items-center gap-2">
+                <Activity className="h-4 w-4 text-orange-500" />
+
+                <span className="text-[10px] font-bold uppercase text-slate-400">
+                  Notes
+                </span>
+              </div>
+
+              <p className="text-xs leading-relaxed text-slate-700 dark:text-slate-300">
+                {selectedLead.notes || "No notes recorded."}
+              </p>
+            </div>
+
+            {/* Actions */}
+            <div className="mt-5 flex flex-col gap-2 sm:flex-row">
+
+              {(selectedLead as any).conversationId && (
+                <button
+                  type="button"
+                  onClick={() => openLeadConversation(selectedLead)}
+                  className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-orange-500 px-4 py-3 text-xs font-extrabold text-white transition hover:bg-orange-600"
+                >
+                  <MessageSquare className="h-4 w-4" />
+                  Open Conversation
+                  <ExternalLink className="h-3.5 w-3.5" />
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={() => setSelectedLead(null)}
+                className="flex-1 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs font-bold text-slate-600 transition hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300"
+              >
+                Close
+              </button>
+
+            </div>
+
           </div>
         </div>
       )}

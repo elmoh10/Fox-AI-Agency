@@ -100,6 +100,13 @@ export const ClientUnifiedInbox: React.FC = () => {
   const [activeChat, setActiveChat] =
     useState<string | null>(null);
 
+  const [preferredConversationId] =
+    useState<string | null>(() =>
+      sessionStorage.getItem(
+        "fox_open_conversation_id"
+      )
+    );
+
   const [activeTab, setActiveTab] =
     useState<
       "all" |
@@ -160,6 +167,20 @@ export const ClientUnifiedInbox: React.FC = () => {
 
         setActiveChat((current) => {
           if (
+            preferredConversationId &&
+            rows.some(
+              (c) =>
+                c.id === preferredConversationId
+            )
+          ) {
+            sessionStorage.removeItem(
+              "fox_open_conversation_id"
+            );
+
+            return preferredConversationId;
+          }
+
+          if (
             current &&
             rows.some((c) => c.id === current)
           ) {
@@ -182,7 +203,10 @@ export const ClientUnifiedInbox: React.FC = () => {
     );
 
     return unsubscribe;
-  }, [currentWorkspace.id]);
+  }, [
+    currentWorkspace.id,
+    preferredConversationId,
+  ]);
 
   // --------------------------------------------------------
   // LIVE MESSAGES FOR SELECTED CONVERSATION

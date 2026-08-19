@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { AppProvider, useApp } from "./context/AppContext";
 import { Navbar } from "./components/Navbar";
 import { Sidebar, ViewTab } from "./components/Sidebar";
@@ -189,6 +189,35 @@ const PlanFeatureGuard: React.FC<{
 const AppContent: React.FC = () => {
   const { currentUser } = useApp();
   const [activeTab, setActiveTab] = useState<ViewTab>("admin_dashboard");
+
+  useEffect(() => {
+    const handleFoxNavigate = (event: Event) => {
+      const detail =
+        (event as CustomEvent<{
+          tab?: ViewTab;
+          conversationId?: string;
+        }>).detail;
+
+      if (!detail?.tab) {
+        return;
+      }
+
+      setActiveTab(detail.tab);
+    };
+
+    window.addEventListener(
+      "fox:navigate",
+      handleFoxNavigate
+    );
+
+    return () => {
+      window.removeEventListener(
+        "fox:navigate",
+        handleFoxNavigate
+      );
+    };
+  }, []);
+
   const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
   const [isTourManualOpen, setIsTourManualOpen] = useState(false);
 
