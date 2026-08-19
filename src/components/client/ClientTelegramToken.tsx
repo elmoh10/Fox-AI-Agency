@@ -19,6 +19,7 @@ import {
   Globe,
   Radio,
 } from "lucide-react";
+import { authenticatedFetch } from "../../services/authenticatedFetch";
 
 export const ClientTelegramToken: React.FC = () => {
   const { currentWorkspace, updateTelegramBotToken, language } = useApp();
@@ -26,7 +27,7 @@ export const ClientTelegramToken: React.FC = () => {
 
   if (!currentWorkspace) return null;
 
-  const [token, setToken] = useState(currentWorkspace.telegramBotToken || "");
+  const [token, setToken] = useState("");
   const [botName, setBotName] = useState(
     currentWorkspace.telegramBotName || `@${(currentWorkspace.name || "fox_agent").toLowerCase().replace(/\s+/g, "_")}_bot`
   );
@@ -44,14 +45,26 @@ export const ClientTelegramToken: React.FC = () => {
   const [testResponse, setTestResponse] = useState("");
   const [isTestingWebhook, setIsTestingWebhook] = useState(false);
 
-  const isConnected = !!currentWorkspace.telegramBotToken && currentWorkspace.telegramBotToken.length > 10;
+  const isConnected =
+    currentWorkspace.telegramBotStatus === "connected";
   const webhookUrl = `https://${window.location.host}/api/telegram/webhook/${currentWorkspace.id}`;
 
-  const handleSaveToken = (e: React.FormEvent) => {
+  const handleSaveToken = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!token.trim()) return;
 
-    updateTelegramBotToken(currentWorkspace.id, token.trim(), botName.trim());
+    try {
+      await updateTelegramBotToken(
+        currentWorkspace.id,
+        token.trim(),
+        botName.trim()
+      );
+
+      // Never keep the raw token in browser state.
+      setToken("");
+    } catch {
+      // AppContext already shows the error toast.
+    }
   };
 
   const handleVerifyToken = async () => {

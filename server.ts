@@ -1,4 +1,10 @@
 import {
+  setWorkspaceSecret,
+  getWorkspaceSecret,
+  deleteWorkspaceSecret,
+} from "./src/services/workspaceSecretVault";
+import { FieldValue } from "firebase-admin/firestore";
+import {
   canWorkspaceUseFeature,
   FoxFeature,
 } from "./src/services/entitlementService";
@@ -2743,6 +2749,108 @@ async function generateWorkspaceTelegramReply(
   );
 }
 
+const workspaceTelegramRuntimeTokens =
+  new Map<string, string>();
+
+/**
+ * Returns a tenant Telegram token server-side only.
+ *
+ * Priority:
+ * 1) Runtime memory cache
+ * 2) Encrypted Workspace Secret Vault
+ * 3) Legacy plaintext workspace field (one-time migration)
+ */
+async function getWorkspaceTelegramRuntimeToken(
+  workspace: any
+): Promise<string> {
+  const workspaceId =
+    String(workspace?.id || "").trim();
+
+  if (!workspaceId) return "";
+
+  const cached =
+    workspaceTelegramRuntimeTokens.get(
+      workspaceId
+    );
+
+  if (cached) {
+    return cached;
+  }
+
+  // Secure Vault is the normal source of truth.
+  const vaultToken =
+    await getWorkspaceSecret(
+      workspaceId,
+      "telegramBotToken"
+    );
+
+  if (vaultToken?.trim()) {
+    const cleanToken = vaultToken.trim();
+
+    workspaceTelegramRuntimeTokens.set(
+      workspaceId,
+      cleanToken
+    );
+
+    return cleanToken;
+  }
+
+  // --------------------------------------------------------
+  // ONE-TIME LEGACY MIGRATION
+  // --------------------------------------------------------
+
+  const legacyToken =
+    String(
+      workspace?.telegramBotToken || ""
+    ).trim();
+
+  if (!legacyToken) {
+    return "";
+  }
+
+  await setWorkspaceSecret(
+    workspaceId,
+    "telegramBotToken",
+    legacyToken
+  );
+
+  workspaceTelegramRuntimeTokens.set(
+    workspaceId,
+    legacyToken
+  );
+
+  try {
+    await adminDb
+      .collection("workspaces")
+      .doc(workspaceId)
+      .update({
+        telegramBotToken:
+          FieldValue.delete(),
+
+        telegramSecretMigratedAt:
+          new Date().toISOString(),
+
+        updatedAt:
+          new Date().toISOString(),
+      });
+
+    // Also remove it from the server's in-memory workspace.
+    delete workspace.telegramBotToken;
+
+    console.log(
+      `🔐 [Workspace Telegram] Legacy plaintext token migrated | Workspace=${workspaceId}`
+    );
+
+  } catch (error) {
+    console.error(
+      `❌ [Workspace Telegram] Plaintext cleanup failed | Workspace=${workspaceId}`,
+      error
+    );
+  }
+
+  return legacyToken;
+}
+
 const workspaceTelegramRatingSessions = new Set<string>();
 
 function getWorkspaceTelegramSessionKey(workspaceId: string, chatId: string) {
@@ -2755,7 +2863,10 @@ async function handleWorkspaceTelegramUpdate(
 ) {
   if (!update?.message?.chat) return;
 
-  const token = String(workspace.telegramBotToken || "").trim();
+  const token =
+    await getWorkspaceTelegramRuntimeToken(
+      workspace
+    );
   if (!token) return;
 
   const chatId = String(update.message.chat.id);
@@ -2937,7 +3048,10 @@ async function startWorkspaceTelegramPolling(workspaceId: string) {
 
   if (!workspace) return;
 
-  const token = String(workspace.telegramBotToken || "").trim();
+  const token =
+    await getWorkspaceTelegramRuntimeToken(
+      workspace
+    );
 
   if (!token || workspace.telegramBotStatus === "disconnected") {
     await stopWorkspaceTelegramPolling(workspaceId);
@@ -3059,7 +3173,10 @@ async function syncWorkspaceTelegramBots() {
     if (!workspace?.id) continue;
 
     const workspaceId = String(workspace.id);
-    const token = String(workspace.telegramBotToken || "").trim();
+    const token =
+    await getWorkspaceTelegramRuntimeToken(
+      workspace
+    );
 
     if (
       token.length > 10 &&
@@ -3115,20 +3232,212 @@ app.post(
   }
 );
 
-// Client workspace Telegram connection status.
-app.get(
-  "/api/telegram/workspace/:workspaceId/status",
-  async (req, res) => {
-    const workspace = getWorkspaceById(req.params.workspaceId);
+// ==========================================================
+// SECURE TENANT TELEGRAM TOKEN MANAGEMENT
+// ==========================================================
+
+app.post(
+  "/api/telegram/workspace/:workspaceId/token",
+  authenticateFirebaseRequest,
+  async (req: any, res) => {
+    const workspace =
+      requireAuthenticatedWorkspace(
+        req,
+        res,
+        req.params.workspaceId
+      );
 
     if (!workspace) {
-      return res.status(404).json({
-        connected: false,
-        error: "Workspace not found",
+      return;
+    }
+
+    const access =
+      requireWorkspaceFeature(
+        workspace,
+        "telegram"
+      );
+
+    if (!access.allowed) {
+      return res
+        .status(access.status)
+        .json(access);
+    }
+
+    const candidateToken =
+      String(
+        req.body?.token || ""
+      ).trim();
+
+    if (!candidateToken) {
+      return res.status(400).json({
+        success: false,
+        code: "TELEGRAM_TOKEN_REQUIRED",
+        error:
+          "Telegram Bot Token is required",
       });
     }
 
-    const token = String(workspace.telegramBotToken || "").trim();
+    // Validate against the real Telegram API BEFORE saving.
+    const botInfo =
+      await callWorkspaceTelegramApi(
+        candidateToken,
+        "getMe"
+      );
+
+    if (!botInfo?.ok) {
+      return res.status(400).json({
+        success: false,
+        code:
+          "INVALID_TELEGRAM_BOT_TOKEN",
+        error:
+          botInfo?.description ||
+          "Invalid Telegram Bot Token",
+      });
+    }
+
+    const workspaceId =
+      String(workspace.id);
+
+    // Store encrypted only.
+    await setWorkspaceSecret(
+      workspaceId,
+      "telegramBotToken",
+      candidateToken
+    );
+
+    workspaceTelegramRuntimeTokens.set(
+      workspaceId,
+      candidateToken
+    );
+
+    const username =
+      botInfo.result?.username
+        ? `@${botInfo.result.username}`
+        : String(
+            req.body?.botName ||
+            workspace.telegramBotName ||
+            ""
+          );
+
+    const now =
+      new Date().toISOString();
+
+    // Persist ONLY safe metadata in the tenant workspace.
+    await adminDb
+      .collection("workspaces")
+      .doc(workspaceId)
+      .update({
+        telegramBotToken:
+          FieldValue.delete(),
+
+        telegramBotStatus:
+          "connected",
+
+        telegramBotName:
+          username,
+
+        telegramBotId:
+          botInfo.result?.id || null,
+
+        telegramConnectedAt:
+          now,
+
+        updatedAt:
+          now,
+      });
+
+    // Update backend in-memory workspace without exposing token.
+    const idx =
+      registeredWorkspacesStore.findIndex(
+        (w) =>
+          String(w.id) ===
+          workspaceId
+      );
+
+    if (idx >= 0) {
+      const updated: any = {
+        ...registeredWorkspacesStore[idx],
+        telegramBotStatus:
+          "connected",
+        telegramBotName:
+          username,
+        telegramBotId:
+          botInfo.result?.id || null,
+        telegramConnectedAt:
+          now,
+        updatedAt:
+          now,
+      };
+
+      delete updated.telegramBotToken;
+
+      registeredWorkspacesStore[idx] =
+        updated;
+    }
+
+    await startWorkspaceTelegramPolling(
+      workspaceId
+    );
+
+    console.log(
+      `🔐 [Workspace Telegram] Secure token connected | Workspace=${workspaceId} | Bot=${username || botInfo.result?.id}`
+    );
+
+    return res.json({
+      success: true,
+      connected: true,
+      hasToken: true,
+
+      // Safe Telegram metadata only.
+      botInfo: {
+        id:
+          botInfo.result?.id,
+        first_name:
+          botInfo.result?.first_name,
+        username:
+          botInfo.result?.username,
+        can_join_groups:
+          botInfo.result?.can_join_groups,
+      },
+
+      workspaceId,
+      telegramBotName: username,
+    });
+  }
+);
+
+// Client workspace Telegram connection status.
+app.get(
+  "/api/telegram/workspace/:workspaceId/status",
+  authenticateFirebaseRequest,
+  async (req: any, res) => {
+    const workspace =
+      requireAuthenticatedWorkspace(
+        req,
+        res,
+        req.params.workspaceId
+      );
+
+    if (!workspace) {
+      return;
+    }
+
+    const access =
+      requireWorkspaceFeature(
+        workspace,
+        "telegram"
+      );
+
+    if (!access.allowed) {
+      return res
+        .status(access.status)
+        .json(access);
+    }
+
+    const token =
+    await getWorkspaceTelegramRuntimeToken(
+      workspace
+    );
 
     if (!token) {
       return res.json({

@@ -13,7 +13,8 @@ export const ClientIntegrations: React.FC = () => {
   if (!currentWorkspace) return null;
 
   const isWhatsappConnected = currentWorkspace.whatsappBotStatus === "connected";
-  const isTelegramConnected = !!currentWorkspace.telegramBotToken && currentWorkspace.telegramBotToken.length > 10;
+  const isTelegramConnected =
+    currentWorkspace.telegramBotStatus === "connected";
 
   const integrations = {
     messaging: [

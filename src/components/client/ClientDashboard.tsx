@@ -88,7 +88,7 @@ export const ClientDashboard: React.FC<{ onNavigate: (tab: any) => void }> = ({ 
   const [activationCodeInput, setActivationCodeInput] = useState("");
   const [isRedeeming, setIsRedeeming] = useState(false);
 
-  const [telegramToken, setTelegramToken] = useState(currentWorkspace.telegramBotToken || "");
+  const [telegramToken, setTelegramToken] = useState("");
   const [telegramBotName, setTelegramBotName] = useState(
     currentWorkspace.telegramBotName || `@${(currentWorkspace.name || "fox_agent").toLowerCase().replace(/\s+/g, "_")}_bot`
   );
@@ -111,7 +111,7 @@ export const ClientDashboard: React.FC<{ onNavigate: (tab: any) => void }> = ({ 
   );
 
   const isTelegramConnected =
-    !!currentWorkspace.telegramBotToken && currentWorkspace.telegramBotToken.length > 10;
+    currentWorkspace.telegramBotStatus === "connected";
 
   // Usage limits calculation
   const limit = currentPlan.aiConversationLimit;
