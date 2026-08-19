@@ -35,6 +35,22 @@ import {
   Activity,
 } from "lucide-react";
 
+type CustomerTimelineItem = {
+  id: string;
+  type:
+    | "customer_message"
+    | "ai_message"
+    | "human_message"
+    | "system_message"
+    | "appointment";
+  title: string;
+  description: string;
+  createdAt: string;
+  sender?: string;
+  agentRole?: string;
+  status?: string;
+};
+
 export const ClientCRM: React.FC = () => {
   const {
     currentWorkspace,
@@ -57,6 +73,12 @@ export const ClientCRM: React.FC = () => {
   const [isSyncingSheets, setIsSyncingSheets] = useState(false);
   const [crmLeads, setCrmLeads] = useState<CustomerLead[]>([]);
   const [loadingLeads, setLoadingLeads] = useState(true);
+
+  const [customerTimeline, setCustomerTimeline] =
+    useState<CustomerTimelineItem[]>([]);
+
+  const [timelineLoading, setTimelineLoading] =
+    useState(false);
 
   useEffect(() => {
     if (!currentWorkspace?.id) {
@@ -242,6 +264,197 @@ export const ClientCRM: React.FC = () => {
       );
     }
   };
+
+  useEffect(() => {
+    if (!selectedLead || !currentWorkspace?.id) {
+      setCustomerTimeline([]);
+      setTimelineLoading(false);
+      return;
+    }
+
+    const workspaceId = String(currentWorkspace.id);
+
+    const conversationId = String(
+      (selectedLead as any).conversationId || ""
+    );
+
+    const leadPhone = String(
+      selectedLead.phone || ""
+    ).replace(/\D/g, "");
+
+    const leadSessionId = String(
+      (selectedLead as any).sessionId || ""
+    );
+
+    setTimelineLoading(true);
+
+    let messageItems: CustomerTimelineItem[] = [];
+    let appointmentItems: CustomerTimelineItem[] = [];
+
+    const publishTimeline = () => {
+      const merged = [
+        ...messageItems,
+        ...appointmentItems,
+      ].sort((a, b) => {
+        return (
+          new Date(b.createdAt || 0).getTime() -
+          new Date(a.createdAt || 0).getTime()
+        );
+      });
+
+      setCustomerTimeline(merged);
+      setTimelineLoading(false);
+    };
+
+    const unsubscribers: Array<() => void> = [];
+
+    if (conversationId) {
+      const messagesQuery = query(
+        collection(
+          db,
+          "workspaces",
+          workspaceId,
+          "conversations",
+          conversationId,
+          "messages"
+        ),
+        orderBy("createdAt", "asc")
+      );
+
+      const unsubscribeMessages = onSnapshot(
+        messagesQuery,
+        (snapshot) => {
+          messageItems = snapshot.docs.map((snapshotDoc) => {
+            const data: any = snapshotDoc.data();
+
+            const sender = String(
+              data.sender || "system"
+            );
+
+            let type: CustomerTimelineItem["type"] =
+              "system_message";
+
+            let title = "System Event";
+
+            if (sender === "customer") {
+              type = "customer_message";
+              title = "Customer Message";
+            } else if (sender === "ai") {
+              type = "ai_message";
+              title = data.agentRole
+                ? `FOX AI • ${data.agentRole}`
+                : "FOX AI Reply";
+            } else if (sender === "human") {
+              type = "human_message";
+              title = "Human Agent Reply";
+            }
+
+            return {
+              id: `msg_${snapshotDoc.id}`,
+              type,
+              title,
+              description: String(data.text || ""),
+              createdAt: String(data.createdAt || ""),
+              sender,
+              agentRole: data.agentRole
+                ? String(data.agentRole)
+                : undefined,
+            };
+          });
+
+          publishTimeline();
+        },
+        (error) => {
+          console.error(
+            "[FOX CRM Timeline] Messages error:",
+            error
+          );
+          publishTimeline();
+        }
+      );
+
+      unsubscribers.push(unsubscribeMessages);
+    }
+
+    const unsubscribeAppointments = onSnapshot(
+      collection(
+        db,
+        "workspaces",
+        workspaceId,
+        "appointments"
+      ),
+      (snapshot) => {
+        appointmentItems = snapshot.docs
+          .map((snapshotDoc) => {
+            const data: any = snapshotDoc.data();
+
+            const appointmentPhone = String(
+              data.phone ||
+              data.patientPhone ||
+              ""
+            ).replace(/\D/g, "");
+
+            const samePhone =
+              Boolean(leadPhone) &&
+              Boolean(appointmentPhone) &&
+              leadPhone === appointmentPhone;
+
+            const sameSession =
+              Boolean(leadSessionId) &&
+              Boolean(data.sessionId) &&
+              leadSessionId === String(data.sessionId);
+
+            if (!samePhone && !sameSession) {
+              return null;
+            }
+
+            const date = String(data.date || "");
+
+            const time = String(
+              data.time ||
+              data.timeSlot ||
+              ""
+            );
+
+            return {
+              id: `appointment_${snapshotDoc.id}`,
+              type: "appointment" as const,
+              title: "Appointment",
+              description: `${date} • ${time}`,
+              createdAt: String(
+                data.createdAt ||
+                data.updatedAt ||
+                `${date}T00:00:00`
+              ),
+              status: String(
+                data.status || "Scheduled"
+              ),
+            };
+          })
+          .filter(Boolean) as CustomerTimelineItem[];
+
+        publishTimeline();
+      },
+      (error) => {
+        console.error(
+          "[FOX CRM Timeline] Appointments error:",
+          error
+        );
+        publishTimeline();
+      }
+    );
+
+    unsubscribers.push(unsubscribeAppointments);
+
+    return () => {
+      unsubscribers.forEach((unsubscribe) =>
+        unsubscribe()
+      );
+    };
+  }, [
+    selectedLead,
+    currentWorkspace?.id,
+  ]);
 
   const openLeadConversation = (lead: CustomerLead) => {
     const conversationId = (lead as any).conversationId;
@@ -645,6 +858,80 @@ export const ClientCRM: React.FC = () => {
               <p className="text-xs leading-relaxed text-slate-700 dark:text-slate-300">
                 {selectedLead.notes || "No notes recorded."}
               </p>
+            </div>
+
+            {/* Customer Timeline */}
+            <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50/50 p-4 dark:border-slate-800 dark:bg-slate-800/30">
+              <div className="mb-4 flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <Activity className="h-5 w-5 text-orange-500" />
+
+                  <div>
+                    <p className="text-xs font-black text-slate-900 dark:text-white">
+                      FOX Customer Timeline
+                    </p>
+
+                    <p className="text-[10px] text-slate-400">
+                      Messages and appointments from Firestore
+                    </p>
+                  </div>
+                </div>
+
+                <span className="rounded-full bg-white px-2.5 py-1 text-[10px] font-bold text-slate-500 shadow-sm dark:bg-slate-900">
+                  {customerTimeline.length} events
+                </span>
+              </div>
+
+              {timelineLoading ? (
+                <div className="py-6 text-center text-xs text-slate-400">
+                  Loading timeline...
+                </div>
+              ) : customerTimeline.length === 0 ? (
+                <div className="rounded-xl bg-white px-4 py-6 text-center text-xs text-slate-400 dark:bg-slate-900">
+                  No customer activity found yet.
+                </div>
+              ) : (
+                <div className="max-h-80 space-y-3 overflow-y-auto pr-1">
+                  {customerTimeline.map((item) => (
+                    <div
+                      key={item.id}
+                      className="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-900"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-[11px] font-extrabold text-slate-800 dark:text-white">
+                            {item.title}
+                          </p>
+
+                          {item.status && (
+                            <span className="mt-1 inline-block rounded-full bg-emerald-500/10 px-2 py-0.5 text-[9px] font-bold text-emerald-500">
+                              {item.status}
+                            </span>
+                          )}
+                        </div>
+
+                        <span className="shrink-0 font-mono text-[9px] text-slate-400">
+                          {item.createdAt
+                            ? new Date(
+                                item.createdAt
+                              ).toLocaleString()
+                            : "—"}
+                        </span>
+                      </div>
+
+                      <p className="mt-2 whitespace-pre-wrap break-words text-[11px] leading-relaxed text-slate-600 dark:text-slate-300">
+                        {item.description}
+                      </p>
+
+                      {item.agentRole && (
+                        <span className="mt-2 inline-block rounded-full bg-purple-500/10 px-2 py-0.5 text-[9px] font-bold text-purple-500">
+                          {item.agentRole}
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* Actions */}
