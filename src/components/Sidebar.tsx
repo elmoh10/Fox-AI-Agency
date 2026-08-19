@@ -488,7 +488,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
             }`}
           >
             <MessageCircle className="h-4 w-4 text-emerald-500" />
-            <span>{isAr ? "ربط الواتس اب (QR Code)" : "WhatsApp (QR Code)"}</span>
+            <span>{isAr ? "ربط WhatsApp Cloud API" : "WhatsApp Cloud API"}</span>
           </button>
           )}
 
@@ -553,7 +553,8 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
             <span>{isAr ? "مستشار فوكس الذكي" : "Smart Fox Advisor"}</span>
           </button>
 
-          <button
+          {isSuperAdmin && (
+<button
             onClick={() => setActiveTab("client_marketing_agent")}
             className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-xs font-semibold transition-colors ${
               activeTab === "client_marketing_agent"
@@ -564,8 +565,10 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
             <Megaphone className="h-4 w-4 text-orange-500" />
             <span>{isAr ? "تسويق الوكالة والسوشيال ميديا" : "Social Marketing Agent"}</span>
           </button>
+)}
 
-          <button
+          {isSuperAdmin && (
+<button
             onClick={() => setActiveTab("client_ai_analytics")}
             className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-xs font-semibold transition-colors ${
               activeTab === "client_ai_analytics"
@@ -576,6 +579,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
             <BarChart2 className="h-4 w-4" />
             <span>{isAr ? "تحليلات الذكاء الاصطناعي" : "AI Analytics"}</span>
           </button>
+)}
 
           <button
             onClick={() => setActiveTab("client_integrations")}

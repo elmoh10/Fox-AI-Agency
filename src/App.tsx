@@ -391,14 +391,28 @@ const AppContent: React.FC = () => {
           </WorkspaceGuard>
         );
       case "client_ai_analytics":
+        if (currentUser.role !== "super_admin") {
+          return (
+            <WorkspaceGuard>
+              <ClientDashboard />
+            </WorkspaceGuard>
+          );
+        }
+
         return (
           <WorkspaceGuard>
-            <PlanFeatureGuard feature="analytics">
-              <ClientAIEngagement />
-            </PlanFeatureGuard>
+            <ClientAIEngagement />
           </WorkspaceGuard>
         );
       case "client_marketing_agent":
+        if (currentUser.role !== "super_admin") {
+          return (
+            <WorkspaceGuard>
+              <ClientDashboard />
+            </WorkspaceGuard>
+          );
+        }
+
         return (
           <WorkspaceGuard>
             <ClientMarketingAgent />

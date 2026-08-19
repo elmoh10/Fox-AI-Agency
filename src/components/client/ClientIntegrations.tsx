@@ -20,10 +20,10 @@ export const ClientIntegrations: React.FC = () => {
     messaging: [
       {
         id: "whatsapp",
-        name: "WhatsApp Business (QR Code)",
+        name: "WhatsApp Business Cloud API",
         icon: <MessageCircle className="h-6 w-6 text-emerald-500"/>,
         connected: isWhatsappConnected,
-        desc: isAr ? "استقبال رسائل الواتساب والرد التلقائي بالذكاء الاصطناعي عبر QR Code" : "Receive WhatsApp messages & AI auto-reply via QR Code",
+        desc: isAr ? "استقبال رسائل WhatsApp والرد التلقائي بالذكاء الاصطناعي عبر Meta Cloud API" : "Receive WhatsApp messages & AI auto-reply via Meta Cloud API",
       },
       {
         id: "instagram",
@@ -127,7 +127,7 @@ export const ClientIntegrations: React.FC = () => {
               }`}
             >
               {integration.id === "whatsapp"
-                ? (integration.connected ? (isAr ? "إدارة ربط QR Code" : "Manage QR Connection") : (isAr ? "ربط بالـ QR Code الآن" : "Connect via QR Code"))
+                ? (integration.connected ? (isAr ? "إدارة WhatsApp Cloud API" : "Manage Cloud API Connection") : (isAr ? "ربط WhatsApp Cloud API الآن" : "Connect WhatsApp Cloud API"))
                 : (integration.connected ? (isAr ? "إدارة الربط" : "Manage Connection") : (isAr ? "ربط الآن" : "Connect Now"))
               }
             </button>
