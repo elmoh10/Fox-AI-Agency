@@ -27,6 +27,7 @@ import { GoogleGenAI } from "@google/genai";
 import { aiAgentService } from "./src/services/aiAgentService";
 import { sharedMemoryService } from "./src/services/sharedMemoryService";
 import { conversationService } from "./src/services/conversationService";
+import { workspaceCrmService } from "./src/services/workspaceCrmService";
 import { emailService } from "./src/services/emailService";
 import { TrialLimitManager } from "./src/services/TrialLimitManager";
 import { db } from "./src/services/firebase";
@@ -2913,6 +2914,34 @@ async function handleWorkspaceTelegramUpdate(
         customerName: telegramCustomerName,
       }
     );
+
+
+  // -------------------------------------------------------
+  // REAL TENANT CRM AUTO-SYNC
+  // One Telegram user = one CRM Lead per workspace.
+  // -------------------------------------------------------
+  try {
+    const crmResult =
+      await workspaceCrmService.upsertChannelCustomer(
+        String(workspace.id),
+        {
+          channel: "telegram",
+          externalCustomerId: chatId,
+          name: telegramCustomerName,
+          sessionId: telegramSessionId,
+          conversationId: inboxConversation.id,
+        }
+      );
+
+    console.log(
+      `👤 [FOX CRM Telegram Sync] Workspace=${workspace.id} | Lead=${crmResult.lead.id} | Created=${crmResult.created}`
+    );
+  } catch (error: any) {
+    console.error(
+      `❌ [FOX CRM Telegram Sync] Workspace=${workspace.id} | Chat=${chatId}`,
+      error?.message || error
+    );
+  }
 
   await conversationService.appendMessage(
     String(workspace.id),

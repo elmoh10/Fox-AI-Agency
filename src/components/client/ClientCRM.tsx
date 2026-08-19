@@ -1,6 +1,17 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useApp } from "../../context/AppContext";
 import { CustomerLead } from "../../types";
+import {
+  collection,
+  doc,
+  onSnapshot,
+  orderBy,
+  query,
+  setDoc,
+  updateDoc,
+} from "firebase/firestore";
+import { db } from "../../services/firebase";
+
 import { signInWithGoogleSheets } from "../../services/googleAuthService";
 import { createCRMSpreadsheet } from "../../services/googleSheetsService";
 import {
@@ -20,7 +31,11 @@ import {
 } from "lucide-react";
 
 export const ClientCRM: React.FC = () => {
-  const { currentWorkspace, crmLeads, addCustomerLead, updateLeadStatus, addToast, updateWorkspaceField } = useApp();
+  const {
+    currentWorkspace,
+    addToast,
+    updateWorkspaceField,
+  } = useApp();
 
   const [searchTerm, setSearchTerm] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
@@ -35,10 +50,58 @@ export const ClientCRM: React.FC = () => {
   const [status, setStatus] = useState<CustomerLead["status"]>("Lead");
   const [notes, setNotes] = useState("");
   const [isSyncingSheets, setIsSyncingSheets] = useState(false);
+  const [crmLeads, setCrmLeads] = useState<CustomerLead[]>([]);
+  const [loadingLeads, setLoadingLeads] = useState(true);
+
+  useEffect(() => {
+    if (!currentWorkspace?.id) {
+      setCrmLeads([]);
+      setLoadingLeads(false);
+      return;
+    }
+
+    setLoadingLeads(true);
+
+    const ref = collection(
+      db,
+      "workspaces",
+      currentWorkspace.id,
+      "crmLeads"
+    );
+
+    const q = query(
+      ref,
+      orderBy("lastInteraction", "desc")
+    );
+
+    const unsubscribe = onSnapshot(
+      q,
+      (snapshot) => {
+        const rows = snapshot.docs.map((snap) => ({
+          id: snap.id,
+          ...snap.data(),
+        })) as CustomerLead[];
+
+        setCrmLeads(rows);
+        setLoadingLeads(false);
+      },
+      (error) => {
+        console.error(
+          "[FOX CRM] Live tenant CRM subscription failed:",
+          error
+        );
+        setLoadingLeads(false);
+      }
+    );
+
+    return unsubscribe;
+  }, [currentWorkspace?.id]);
 
   if (!currentWorkspace) return null;
 
-  const leads = crmLeads.filter((l) => l.workspaceId === currentWorkspace.id);
+  const leads = crmLeads.filter(
+    (l) => l.workspaceId === currentWorkspace.id
+  );
 
   const filtered = leads.filter((l) => {
     const leadName = l.name || (l as any).customerName || "";
@@ -70,26 +133,109 @@ export const ClientCRM: React.FC = () => {
     }
   };
 
-  const handleCreate = (e: React.FormEvent) => {
+  const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name || !phone) return;
-    addCustomerLead({
+
+    if (!name.trim() || !phone.trim()) {
+      return;
+    }
+
+    const now = new Date().toISOString();
+
+    const id =
+      `manual_${Date.now()}_${Math.random()
+        .toString(36)
+        .substring(2, 8)}`;
+
+    const lead: CustomerLead = {
+      id,
       workspaceId: currentWorkspace.id,
-      name,
-      phone,
-      email,
+      name: name.trim(),
+      phone: phone.trim(),
+      email: email.trim() || undefined,
       channel,
       status,
       tags: [],
+      notes: notes.trim(),
       totalSpentEGP: 0,
-      lastInteraction: "Just now",
-      notes,
-    });
-    setIsAddModalOpen(false);
-    setName("");
-    setPhone("");
-    setEmail("");
-    setNotes("");
+      createdAt: now,
+      lastInteraction: now,
+    };
+
+    try {
+      await setDoc(
+        doc(
+          db,
+          "workspaces",
+          currentWorkspace.id,
+          "crmLeads",
+          id
+        ),
+        lead
+      );
+
+      addToast(
+        "CRM Record created",
+        "success"
+      );
+
+      setIsAddModalOpen(false);
+      setName("");
+      setPhone("");
+      setEmail("");
+      setNotes("");
+
+    } catch (error: any) {
+      console.error(
+        "[FOX CRM] Manual lead create failed:",
+        error
+      );
+
+      addToast(
+        error?.message ||
+          "Failed to create CRM record",
+        "error"
+      );
+    }
+  };
+
+  const handleUpdateLeadStatus = async (
+    leadId: string,
+    nextStatus: CustomerLead["status"]
+  ) => {
+    try {
+      await updateDoc(
+        doc(
+          db,
+          "workspaces",
+          currentWorkspace.id,
+          "crmLeads",
+          leadId
+        ),
+        {
+          status: nextStatus,
+          lastInteraction:
+            new Date().toISOString(),
+        }
+      );
+
+      addToast(
+        `Lead status set to ${nextStatus}`,
+        "info"
+      );
+
+    } catch (error: any) {
+      console.error(
+        "[FOX CRM] Status update failed:",
+        error
+      );
+
+      addToast(
+        error?.message ||
+          "Failed to update lead status",
+        "error"
+      );
+    }
   };
 
   const handleExportCSV = () => {
@@ -197,6 +343,28 @@ export const ClientCRM: React.FC = () => {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+              {loadingLeads && (
+                <tr>
+                  <td
+                    colSpan={6}
+                    className="py-8 text-center text-xs text-slate-400"
+                  >
+                    Loading CRM customers...
+                  </td>
+                </tr>
+              )}
+
+              {!loadingLeads && filtered.length === 0 && (
+                <tr>
+                  <td
+                    colSpan={6}
+                    className="py-8 text-center text-xs text-slate-400"
+                  >
+                    No CRM customers yet.
+                  </td>
+                </tr>
+              )}
+
               {filtered.map((lead) => (
                 <tr key={lead.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/50">
                   <td className="py-3.5 px-4 font-bold text-slate-900 dark:text-white">
@@ -223,7 +391,7 @@ export const ClientCRM: React.FC = () => {
                   <td className="py-3.5 px-4">
                     <select
                       value={lead.status}
-                      onChange={(e) => updateLeadStatus(lead.id, e.target.value as any)}
+                      onChange={(e) => handleUpdateLeadStatus(lead.id, e.target.value as CustomerLead["status"])}
                       className="rounded-lg border border-slate-200 bg-slate-50 py-1 px-2 text-[11px] font-bold text-slate-700 dark:border-slate-800 dark:bg-slate-800 dark:text-slate-200"
                     >
                       <option value="Lead">Lead</option>
