@@ -9,6 +9,7 @@ import {
   query,
   setDoc,
   updateDoc,
+  where,
 } from "firebase/firestore";
 import { db } from "../../services/firebase";
 
@@ -33,6 +34,10 @@ import {
   CalendarCheck,
   ExternalLink,
   Activity,
+  AlertTriangle,
+  Star,
+  TicketPercent,
+  BadgeCheck,
 } from "lucide-react";
 
 type CustomerTimelineItem = {
@@ -42,7 +47,10 @@ type CustomerTimelineItem = {
     | "ai_message"
     | "human_message"
     | "system_message"
-    | "appointment";
+    | "appointment"
+    | "complaint"
+    | "rating"
+    | "coupon";
   title: string;
   description: string;
   createdAt: string;
@@ -290,11 +298,17 @@ export const ClientCRM: React.FC = () => {
 
     let messageItems: CustomerTimelineItem[] = [];
     let appointmentItems: CustomerTimelineItem[] = [];
+    let complaintItems: CustomerTimelineItem[] = [];
+    let ratingItems: CustomerTimelineItem[] = [];
+    let couponItems: CustomerTimelineItem[] = [];
 
     const publishTimeline = () => {
       const merged = [
         ...messageItems,
         ...appointmentItems,
+        ...complaintItems,
+        ...ratingItems,
+        ...couponItems,
       ].sort((a, b) => {
         return (
           new Date(b.createdAt || 0).getTime() -
@@ -445,6 +459,275 @@ export const ClientCRM: React.FC = () => {
     );
 
     unsubscribers.push(unsubscribeAppointments);
+
+    // --------------------------------------------------------
+    // CUSTOMER COMPLAINTS
+    // --------------------------------------------------------
+    const complaintsRef = collection(db, "complaints");
+
+    const complaintsQuery = query(
+      complaintsRef,
+      where("workspaceId", "==", currentWorkspace.id)
+    );
+
+    const unsubscribeComplaints = onSnapshot(
+      complaintsQuery,
+      (snapshot) => {
+        const selectedPhone = String(selectedLead.phone || "")
+          .replace(/\D/g, "");
+
+        complaintItems = snapshot.docs
+          .map((snap) => {
+            const data: any = snap.data();
+
+            const complaintPhone = String(
+              data.customerPhone ||
+              data.phone ||
+              ""
+            ).replace(/\D/g, "");
+
+            const samePhone =
+              selectedPhone &&
+              complaintPhone &&
+              (
+                selectedPhone === complaintPhone ||
+                selectedPhone.endsWith(complaintPhone) ||
+                complaintPhone.endsWith(selectedPhone)
+              );
+
+            const sameSession =
+              (selectedLead as any).sessionId &&
+              data.sessionId === (selectedLead as any).sessionId;
+
+            const sameLead =
+              data.leadId === selectedLead.id ||
+              data.customerId === selectedLead.id;
+
+            if (!samePhone && !sameSession && !sameLead) {
+              return null;
+            }
+
+            return {
+              id: `complaint_${snap.id}`,
+              type: "complaint" as const,
+              title: "Customer Complaint",
+              description:
+                data.message ||
+                data.complaint ||
+                data.description ||
+                data.text ||
+                "Customer complaint received.",
+              createdAt:
+                data.createdAt ||
+                data.updatedAt ||
+                new Date(0).toISOString(),
+              sender:
+                data.customerName ||
+                selectedLead.name ||
+                "Customer",
+              status:
+                data.status ||
+                data.priority ||
+                "Open",
+            };
+          })
+          .filter(Boolean) as CustomerTimelineItem[];
+
+        publishTimeline();
+      },
+      (error) => {
+        console.error(
+          "[FOX CRM Timeline] Complaints error:",
+          error
+        );
+        complaintItems = [];
+        publishTimeline();
+      }
+    );
+
+    unsubscribers.push(unsubscribeComplaints);
+
+    // --------------------------------------------------------
+    // SERVICE RATINGS
+    // --------------------------------------------------------
+    const ratingsRef = collection(db, "serviceRatings");
+
+    const ratingsQuery = query(
+      ratingsRef,
+      where("workspaceId", "==", currentWorkspace.id)
+    );
+
+    const unsubscribeRatings = onSnapshot(
+      ratingsQuery,
+      (snapshot) => {
+        const selectedPhone = String(selectedLead.phone || "")
+          .replace(/\D/g, "");
+
+        ratingItems = snapshot.docs
+          .map((snap) => {
+            const data: any = snap.data();
+
+            const ratingPhone = String(
+              data.customerPhone ||
+              data.phone ||
+              ""
+            ).replace(/\D/g, "");
+
+            const samePhone =
+              selectedPhone &&
+              ratingPhone &&
+              (
+                selectedPhone === ratingPhone ||
+                selectedPhone.endsWith(ratingPhone) ||
+                ratingPhone.endsWith(selectedPhone)
+              );
+
+            const sameSession =
+              (selectedLead as any).sessionId &&
+              data.sessionId === (selectedLead as any).sessionId;
+
+            const sameLead =
+              data.leadId === selectedLead.id ||
+              data.customerId === selectedLead.id;
+
+            if (!samePhone && !sameSession && !sameLead) {
+              return null;
+            }
+
+            const rating =
+              Number(
+                data.rating ??
+                data.score ??
+                data.stars ??
+                0
+              ) || 0;
+
+            return {
+              id: `rating_${snap.id}`,
+              type: "rating" as const,
+              title: `Service Rating ${rating ? `${rating}/5` : ""}`,
+              description:
+                data.comment ||
+                data.feedback ||
+                data.review ||
+                `Customer submitted a ${rating}/5 service rating.`,
+              createdAt:
+                data.createdAt ||
+                data.updatedAt ||
+                new Date(0).toISOString(),
+              sender:
+                data.customerName ||
+                selectedLead.name ||
+                "Customer",
+              status:
+                rating ? `${rating}/5` : "Rated",
+            };
+          })
+          .filter(Boolean) as CustomerTimelineItem[];
+
+        publishTimeline();
+      },
+      (error) => {
+        console.error(
+          "[FOX CRM Timeline] Ratings error:",
+          error
+        );
+        ratingItems = [];
+        publishTimeline();
+      }
+    );
+
+    unsubscribers.push(unsubscribeRatings);
+
+    // --------------------------------------------------------
+    // COUPON REDEMPTIONS
+    // Tenant-scoped collection created by couponService.
+    // --------------------------------------------------------
+    const redemptionsRef = collection(
+      db,
+      "workspaces",
+      currentWorkspace.id,
+      "couponRedemptions"
+    );
+
+    const unsubscribeRedemptions = onSnapshot(
+      redemptionsRef,
+      (snapshot) => {
+        const selectedPhone = String(selectedLead.phone || "")
+          .replace(/\D/g, "");
+
+        couponItems = snapshot.docs
+          .map((snap) => {
+            const data: any = snap.data();
+
+            const redemptionPhone = String(
+              data.customerPhone ||
+              data.phone ||
+              ""
+            ).replace(/\D/g, "");
+
+            const samePhone =
+              selectedPhone &&
+              redemptionPhone &&
+              (
+                selectedPhone === redemptionPhone ||
+                selectedPhone.endsWith(redemptionPhone) ||
+                redemptionPhone.endsWith(selectedPhone)
+              );
+
+            const sameSession =
+              (selectedLead as any).sessionId &&
+              data.sessionId === (selectedLead as any).sessionId;
+
+            if (!samePhone && !sameSession) {
+              return null;
+            }
+
+            const originalAmount =
+              Number(data.originalAmount || 0);
+
+            const discountAmount =
+              Number(data.discountAmount || 0);
+
+            const finalAmount =
+              Number(data.finalAmount || 0);
+
+            return {
+              id: `coupon_${snap.id}`,
+              type: "coupon" as const,
+              title: `Coupon ${data.code || ""} Redeemed`,
+              description:
+                `Original: ${originalAmount} EGP • ` +
+                `Discount: ${discountAmount} EGP • ` +
+                `Final: ${finalAmount} EGP`,
+              createdAt:
+                data.redeemedAt ||
+                data.createdAt ||
+                new Date(0).toISOString(),
+              sender:
+                data.customerName ||
+                selectedLead.name ||
+                "Customer",
+              status:
+                data.code ||
+                "Redeemed",
+            };
+          })
+          .filter(Boolean) as CustomerTimelineItem[];
+
+        publishTimeline();
+      },
+      (error) => {
+        console.error(
+          "[FOX CRM Timeline] Coupon redemptions error:",
+          error
+        );
+        couponItems = [];
+        publishTimeline();
+      }
+    );
+
+    unsubscribers.push(unsubscribeRedemptions);
 
     return () => {
       unsubscribers.forEach((unsubscribe) =>
