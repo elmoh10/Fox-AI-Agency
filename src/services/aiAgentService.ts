@@ -5,6 +5,7 @@ import { workspaceDataService } from "./workspaceDataService";
 import { triggerExternalCRM } from "./crmService";
 import { sharedMemoryService } from "./sharedMemoryService";
 import { creditService } from "./creditService";
+import { couponService } from "./couponService";
 import { workspaceCrmService } from "./workspaceCrmService";
 
 export interface AiAgentConfig {
@@ -2299,6 +2300,261 @@ ${industryContext || "Standard business inquiry catalog."}
           "❌ [FOX Direct Booking Error]",
           bookingError
         );
+      }
+    }
+
+    // =========================================================
+    // DETERMINISTIC COUPON VALIDATION
+    //
+    // Coupon validity is a business transaction and MUST NOT
+    // be invented or guessed by an LLM.
+    // =========================================================
+    if (workspace?.id) {
+      const couponMessage =
+        String(message || "").trim();
+
+      const couponLower =
+        couponMessage.toLowerCase();
+
+      const hasCouponIntent =
+        /(?:كوبون|كود\s*(?:خصم)?|برومو|promo|coupon|discount\s*code)/i.test(
+          couponLower
+        );
+
+      if (hasCouponIntent) {
+        // Accept examples:
+        // "معايا كود FOX20"
+        // "كوبون LASER20"
+        // "promo SUMMER25"
+        //
+        // Coupon codes are intentionally restricted to a safe
+        // alphanumeric format with _ and -.
+        const couponPatterns = [
+          /(?:كود(?:\s*خصم)?|كوبون|برومو)\s*[:：-]?\s*([A-Za-z0-9_-]{3,40})/i,
+          /(?:coupon|promo|discount\s*code)\s*[:：-]?\s*([A-Za-z0-9_-]{3,40})/i,
+        ];
+
+        let couponCode = "";
+
+        for (const pattern of couponPatterns) {
+          const match =
+            couponMessage.match(pattern);
+
+          if (match?.[1]) {
+            couponCode =
+              String(match[1])
+                .trim()
+                .toUpperCase();
+
+            break;
+          }
+        }
+
+        if (!couponCode) {
+          const reply =
+            messageLang === "ar"
+              ? "🎟️ تمام. ابعت كود الخصم نفسه من فضلك، مثال: FOX20"
+              : "🎟️ Sure. Please send the coupon code, for example: FOX20.";
+
+          return {
+            response: reply,
+            aiResponse: reply,
+            detectedLanguage: messageLang,
+            source: "firestore:coupon_missing_code",
+            suggestedActions: [],
+          };
+        }
+
+        try {
+          const couponValidation =
+            await couponService.validateCoupon(
+              workspace.id,
+              couponCode
+            );
+
+          if (!couponValidation.valid) {
+            const reason =
+              couponValidation.reason;
+
+            let reply = "";
+
+            if (messageLang === "ar") {
+              switch (reason) {
+                case "COUPON_INACTIVE":
+                  reply =
+                    `🎟️ كود ${couponCode} موجود لكنه غير مفعّل حالياً.`;
+                  break;
+
+                case "COUPON_NOT_STARTED":
+                  reply =
+                    `🎟️ كود ${couponCode} لم تبدأ فترة صلاحيته بعد.`;
+                  break;
+
+                case "COUPON_EXPIRED":
+                  reply =
+                    `🎟️ كود ${couponCode} انتهت صلاحيته.`;
+                  break;
+
+                case "COUPON_USAGE_LIMIT_REACHED":
+                  reply =
+                    `🎟️ كود ${couponCode} وصل للحد الأقصى من مرات الاستخدام.`;
+                  break;
+
+                case "COUPON_NOT_FOUND":
+                default:
+                  reply =
+                    `❌ كود الخصم ${couponCode} غير صحيح أو غير تابع لهذه المنشأة.`;
+                  break;
+              }
+            } else {
+              switch (reason) {
+                case "COUPON_INACTIVE":
+                  reply =
+                    `🎟️ Coupon ${couponCode} exists but is currently inactive.`;
+                  break;
+
+                case "COUPON_NOT_STARTED":
+                  reply =
+                    `🎟️ Coupon ${couponCode} is not valid yet.`;
+                  break;
+
+                case "COUPON_EXPIRED":
+                  reply =
+                    `🎟️ Coupon ${couponCode} has expired.`;
+                  break;
+
+                case "COUPON_USAGE_LIMIT_REACHED":
+                  reply =
+                    `🎟️ Coupon ${couponCode} has reached its usage limit.`;
+                  break;
+
+                default:
+                  reply =
+                    `❌ Coupon ${couponCode} is invalid for this business.`;
+              }
+            }
+
+            console.log(
+              `🎟️ [FOX Coupon] Rejected | Workspace=${workspace.id} | Code=${couponCode} | Reason=${reason}`
+            );
+
+            return {
+              response: reply,
+              aiResponse: reply,
+              detectedLanguage: messageLang,
+              source: "firestore:coupon_invalid",
+              suggestedActions: [],
+            };
+          }
+
+          const coupon: any =
+            couponValidation.coupon;
+
+          const discountText =
+            coupon.discountType === "percentage"
+              ? `${coupon.discountValue}%`
+              : `${coupon.discountValue} EGP`;
+
+          const usageLimit =
+            Number(coupon.usageLimit || 0);
+
+          const usageCount =
+            Number(coupon.usageCount || 0);
+
+          const remaining =
+            usageLimit > 0
+              ? Math.max(
+                  0,
+                  usageLimit - usageCount
+                )
+              : null;
+
+          const reply =
+            messageLang === "ar"
+              ? (
+                  `✅ كود الخصم ${couponCode} صالح.\n\n` +
+                  `🎁 قيمة الخصم: ${discountText}\n` +
+                  `📌 الشروط: ${coupon.condition || "طبقاً لشروط العرض"}\n` +
+                  (
+                    coupon.validUntil
+                      ? `📅 صالح حتى: ${coupon.validUntil}\n`
+                      : ""
+                  ) +
+                  (
+                    remaining !== null
+                      ? `🔢 الاستخدامات المتبقية: ${remaining}\n`
+                      : ""
+                  ) +
+                  `\nسيتم تطبيق الخصم عند إتمام العملية المؤهلة للعرض.`
+                )
+              : (
+                  `✅ Coupon ${couponCode} is valid.\n\n` +
+                  `🎁 Discount: ${discountText}\n` +
+                  `📌 Conditions: ${coupon.condition || "Offer conditions apply"}\n` +
+                  (
+                    coupon.validUntil
+                      ? `📅 Valid until: ${coupon.validUntil}\n`
+                      : ""
+                  ) +
+                  (
+                    remaining !== null
+                      ? `🔢 Remaining uses: ${remaining}\n`
+                      : ""
+                  ) +
+                  `\nThe discount will be applied when an eligible transaction is completed.`
+                );
+
+          console.log(
+            `✅ [FOX Coupon] Validated | Workspace=${workspace.id} | Code=${couponCode} | Discount=${discountText}`
+          );
+
+          // Remember the validated coupon in shared memory so the
+          // following booking/order flow can redeem the SAME code.
+          if (params.sessionId) {
+            await sharedMemoryService.appendMessage(
+              workspace.id,
+              params.sessionId,
+              {
+                sender: "bot",
+                text:
+                  `[FOX_COUPON_VALIDATED:${couponCode}] ${reply}`,
+                time:
+                  new Date().toISOString(),
+                agentRole: "Marketing"
+              }
+            );
+          }
+
+          return {
+            response: reply,
+            aiResponse: reply,
+            detectedLanguage: messageLang,
+            source: "firestore:coupon_valid",
+            suggestedActions:
+              messageLang === "ar"
+                ? ["إتمام الحجز", "إتمام الطلب"]
+                : ["Complete Booking", "Complete Order"],
+          };
+
+        } catch (couponError) {
+          console.error(
+            `❌ [FOX Coupon] Validation error | Workspace=${workspace.id} | Code=${couponCode}`,
+            couponError
+          );
+
+          const reply =
+            messageLang === "ar"
+              ? "تعذر التحقق من كود الخصم حالياً. حاول مرة أخرى بعد قليل."
+              : "I couldn't verify the coupon right now. Please try again shortly.";
+
+          return {
+            response: reply,
+            aiResponse: reply,
+            detectedLanguage: messageLang,
+            source: "firestore:coupon_error",
+            suggestedActions: [],
+          };
+        }
       }
     }
 

@@ -423,6 +423,14 @@ export interface Coupon {
   condition: string;
   isActive: boolean;
   aiCanUse: boolean;
+
+  // Real coupon lifecycle
+  usageLimit?: number;
+  usageCount?: number;
+  validFrom?: string;
+  validUntil?: string;
+  lastUsedAt?: string;
+
   createdAt: string;
 }
 

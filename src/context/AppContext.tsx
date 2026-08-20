@@ -2307,6 +2307,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const newCoupon: Coupon = {
       ...couponData,
       id: `coup_${Math.random().toString(36).substring(2, 9)}`,
+      code: String(couponData.code || "").trim().toUpperCase(),
+      usageCount: couponData.usageCount ?? 0,
+      usageLimit: couponData.usageLimit ?? 0,
       createdAt: new Date().toISOString()
     };
     setCoupons(prev => [newCoupon, ...prev]);
