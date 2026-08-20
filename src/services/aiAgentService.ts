@@ -597,6 +597,59 @@ ${industryContext || "Standard business inquiry catalog."}
   // Every tenant AI request passes through this method.
   // Firestore is the source of truth for conversation credits.
   // =========================================================
+  /**
+   * FOX AI BILLING CLASSIFIER
+   *
+   * Conversation credits represent actual AI/LLM usage.
+   * Deterministic Firestore/business-logic responses must not
+   * consume tenant AI credits.
+   */
+  private shouldConsumeAiCredit(result: ChatResponse): boolean {
+    const source = String(result?.source || "")
+      .trim()
+      .toLowerCase();
+
+    // Firestore/database/business-logic responses are deterministic.
+    if (source.startsWith("firestore:")) {
+      return false;
+    }
+
+    // FOX guards/parsers/state-machine responses do not call an LLM.
+    const nonBillableFoxSources = new Set([
+      "fox_credit_guard",
+      "fox_credit_guard_error",
+      "fox_modify_flow",
+      "fox_modify_invalid_selection",
+      "fox_modify_parser",
+      "fox_cancel_flow",
+      "fox_crm_lookup",
+      "fox_booking_datetime_guard",
+      "fox_booking_identity_guard",
+      "fox_booking_guard",
+      "fox_booking_parser",
+    ]);
+
+    if (nonBillableFoxSources.has(source)) {
+      return false;
+    }
+
+    /*
+     * fallback_engine is local deterministic fallback logic.
+     * It must not consume an AI conversation credit.
+     */
+    if (source === "fallback_engine") {
+      return false;
+    }
+
+    /*
+     * Everything else is considered billable.
+     *
+     * This intentionally keeps OpenRouter/Gemini and future
+     * real AI-provider sources billable by default.
+     */
+    return true;
+  }
+
   public async generateChatResponse(
     params: GenerateChatParams
   ): Promise<ChatResponse> {
@@ -647,10 +700,23 @@ ${industryContext || "Standard business inquiry catalog."}
         await this.generateChatResponseInternal(params);
 
       /*
-       * Consume only after a successful response.
-       * If the AI provider throws before returning a result,
-       * the customer is not charged.
+       * Consume a conversation credit only when this response
+       * represents real AI/LLM usage.
+       *
+       * Deterministic Firestore / booking / coupon / CRM flows
+       * are free and must not reduce the tenant AI balance.
        */
+      const shouldBill =
+        this.shouldConsumeAiCredit(result);
+
+      if (!shouldBill) {
+        console.log(
+          `⚪ [FOX Credits] Not billed | Workspace=${workspaceId} | Source=${result.source}`
+        );
+
+        return result;
+      }
+
       try {
         const usage =
           await creditService.consumeConversation(
@@ -662,7 +728,7 @@ ${industryContext || "Standard business inquiry catalog."}
           );
 
         console.log(
-          `💳 [FOX Credits] Consumed 1 | Workspace=${workspaceId} | Used=${usage.aiConversationsUsed} | Balance=${
+          `💳 [FOX Credits] Consumed 1 | Workspace=${workspaceId} | Source=${result.source} | Used=${usage.aiConversationsUsed} | Balance=${
             usage.unlimited
               ? "UNLIMITED"
               : usage.creditBalance

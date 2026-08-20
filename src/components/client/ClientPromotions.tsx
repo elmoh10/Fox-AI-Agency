@@ -1,6 +1,17 @@
 import React, { useState } from "react";
 import { useApp } from "../../context/AppContext";
-import { Tag, Plus, Trash2, Zap, CheckCircle, Percent, Banknote, HelpCircle } from "lucide-react";
+import {
+  Tag,
+  Plus,
+  Trash2,
+  Zap,
+  Percent,
+  Banknote,
+  CalendarDays,
+  Users,
+  Activity,
+  Clock3,
+} from "lucide-react";
 
 export const ClientPromotions: React.FC = () => {
   const { currentWorkspace, coupons, addCoupon, deleteCoupon, toggleCouponAI, language } = useApp();
@@ -13,21 +24,155 @@ export const ClientPromotions: React.FC = () => {
     discountValue: "",
     condition: "",
     aiCanUse: true,
+    usageLimit: "",
+    validFrom: "",
+    validUntil: "",
   });
 
   const handleAdd = () => {
-    if (!form.code || !form.discountValue || !form.condition) return;
+    if (
+      !currentWorkspace ||
+      !form.code.trim() ||
+      !form.discountValue ||
+      !form.condition.trim()
+    ) {
+      return;
+    }
+
+    const discountValue = Number(form.discountValue);
+    const usageLimit = Number(form.usageLimit || 0);
+
+    if (
+      !Number.isFinite(discountValue) ||
+      discountValue <= 0
+    ) {
+      return;
+    }
+
+    if (
+      form.discountType === "percentage" &&
+      discountValue > 100
+    ) {
+      return;
+    }
+
+    if (
+      form.validFrom &&
+      form.validUntil &&
+      form.validUntil < form.validFrom
+    ) {
+      return;
+    }
+
     addCoupon({
-      workspaceId: currentWorkspace!.id,
-      code: form.code.toUpperCase(),
+      workspaceId: currentWorkspace.id,
+      code: form.code.trim().toUpperCase(),
       discountType: form.discountType,
-      discountValue: Number(form.discountValue),
-      condition: form.condition,
+      discountValue,
+      condition: form.condition.trim(),
       isActive: true,
-      aiCanUse: form.aiCanUse
+      aiCanUse: form.aiCanUse,
+      usageCount: 0,
+      usageLimit:
+        Number.isFinite(usageLimit) && usageLimit > 0
+          ? Math.floor(usageLimit)
+          : 0,
+      validFrom: form.validFrom || undefined,
+      validUntil: form.validUntil || undefined,
     });
-    setForm({ code: "", discountType: "percentage", discountValue: "", condition: "", aiCanUse: true });
+
+    setForm({
+      code: "",
+      discountType: "percentage",
+      discountValue: "",
+      condition: "",
+      aiCanUse: true,
+      usageLimit: "",
+      validFrom: "",
+      validUntil: "",
+    });
+
     setShowAdd(false);
+  };
+
+  const getCouponState = (coupon: any) => {
+    const now = new Date();
+    const today = now.toISOString().slice(0, 10);
+
+    const usageCount = Number(coupon.usageCount || 0);
+    const usageLimit = Number(coupon.usageLimit || 0);
+
+    if (!coupon.isActive) {
+      return {
+        label: isAr ? "غير نشط" : "Inactive",
+        className:
+          "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300",
+      };
+    }
+
+    if (
+      coupon.validFrom &&
+      today < String(coupon.validFrom).slice(0, 10)
+    ) {
+      return {
+        label: isAr ? "لم يبدأ بعد" : "Scheduled",
+        className:
+          "bg-blue-50 text-blue-700 dark:bg-blue-500/10 dark:text-blue-300",
+      };
+    }
+
+    if (
+      coupon.validUntil &&
+      today > String(coupon.validUntil).slice(0, 10)
+    ) {
+      return {
+        label: isAr ? "منتهي" : "Expired",
+        className:
+          "bg-rose-50 text-rose-700 dark:bg-rose-500/10 dark:text-rose-300",
+      };
+    }
+
+    if (
+      usageLimit > 0 &&
+      usageCount >= usageLimit
+    ) {
+      return {
+        label: isAr ? "اكتمل الاستخدام" : "Limit Reached",
+        className:
+          "bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300",
+      };
+    }
+
+    return {
+      label: isAr ? "نشط" : "Active",
+      className:
+        "bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300",
+    };
+  };
+
+  const formatCouponDate = (value?: string) => {
+    if (!value) {
+      return isAr ? "غير محدد" : "Not set";
+    }
+
+    const date = new Date(
+      String(value).length === 10
+        ? `${value}T00:00:00`
+        : value
+    );
+
+    if (Number.isNaN(date.getTime())) {
+      return value;
+    }
+
+    return new Intl.DateTimeFormat(
+      isAr ? "ar-EG" : "en-GB",
+      {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+      }
+    ).format(date);
   };
 
   return (
@@ -99,6 +244,77 @@ export const ClientPromotions: React.FC = () => {
               />
             </div>
           </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
+            <div>
+              <label className="text-[10px] font-bold text-slate-500 mb-1 block uppercase tracking-wider">
+                {isAr ? "الحد الأقصى للاستخدام" : "Usage Limit"}
+              </label>
+
+              <input
+                type="number"
+                min="0"
+                step="1"
+                value={form.usageLimit}
+                onChange={(e) =>
+                  setForm({
+                    ...form,
+                    usageLimit: e.target.value,
+                  })
+                }
+                placeholder={
+                  isAr
+                    ? "0 = غير محدود"
+                    : "0 = Unlimited"
+                }
+                className="w-full rounded-xl border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm font-bold outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+              />
+
+              <p className="mt-1 text-[10px] font-medium text-slate-400">
+                {isAr
+                  ? "اتركه 0 أو فارغًا للسماح بعدد غير محدود."
+                  : "Leave 0 or empty for unlimited usage."}
+              </p>
+            </div>
+
+            <div>
+              <label className="text-[10px] font-bold text-slate-500 mb-1 block uppercase tracking-wider">
+                {isAr ? "يبدأ من" : "Valid From"}
+              </label>
+
+              <input
+                type="date"
+                value={form.validFrom}
+                onChange={(e) =>
+                  setForm({
+                    ...form,
+                    validFrom: e.target.value,
+                  })
+                }
+                className="w-full rounded-xl border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm font-bold outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+              />
+            </div>
+
+            <div>
+              <label className="text-[10px] font-bold text-slate-500 mb-1 block uppercase tracking-wider">
+                {isAr ? "ينتهي في" : "Valid Until"}
+              </label>
+
+              <input
+                type="date"
+                value={form.validUntil}
+                min={form.validFrom || undefined}
+                onChange={(e) =>
+                  setForm({
+                    ...form,
+                    validUntil: e.target.value,
+                  })
+                }
+                className="w-full rounded-xl border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm font-bold outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+              />
+            </div>
+          </div>
+
           <div className="flex flex-col sm:flex-row items-center justify-between gap-4 border-t border-indigo-200 dark:border-indigo-900/40 pt-4">
             <label className="flex items-center gap-3 cursor-pointer">
               <input 
@@ -156,7 +372,17 @@ export const ClientPromotions: React.FC = () => {
                     <span className="block text-xl font-black text-slate-900 dark:text-white tracking-tight">
                       {coupon.discountType === 'percentage' ? `${coupon.discountValue}%` : `${coupon.discountValue} EGP`}
                     </span>
-                    <span className="text-[10px] font-bold text-emerald-500 uppercase tracking-wider">{isAr ? "نشط" : "Active"}</span>
+                    {(() => {
+                      const state = getCouponState(coupon);
+
+                      return (
+                        <span
+                          className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider ${state.className}`}
+                        >
+                          {state.label}
+                        </span>
+                      );
+                    })()}
                   </div>
                 </div>
                 <button 
@@ -174,9 +400,111 @@ export const ClientPromotions: React.FC = () => {
                 </div>
 
                 <div>
-                  <div className="text-[10px] font-bold text-slate-500 mb-0.5">{isAr ? "شروط الاستخدام" : "Conditions"}</div>
-                  <div className="text-sm font-semibold text-slate-700 dark:text-slate-300">{coupon.condition}</div>
+                  <div className="text-[10px] font-bold text-slate-500 mb-0.5">
+                    {isAr ? "شروط الاستخدام" : "Conditions"}
+                  </div>
+
+                  <div className="text-sm font-semibold text-slate-700 dark:text-slate-300">
+                    {coupon.condition}
+                  </div>
                 </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="rounded-xl border border-slate-100 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-800/50">
+                    <div className="mb-1 flex items-center gap-1 text-[10px] font-bold text-slate-400">
+                      <Users className="h-3.5 w-3.5" />
+                      {isAr ? "الاستخدام" : "Usage"}
+                    </div>
+
+                    <div className="text-sm font-black text-slate-800 dark:text-white">
+                      {Number(coupon.usageCount || 0)}
+                      {" / "}
+                      {Number(coupon.usageLimit || 0) > 0
+                        ? Number(coupon.usageLimit)
+                        : isAr
+                          ? "∞"
+                          : "∞"}
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-slate-100 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-800/50">
+                    <div className="mb-1 flex items-center gap-1 text-[10px] font-bold text-slate-400">
+                      <Activity className="h-3.5 w-3.5" />
+                      {isAr ? "آخر استخدام" : "Last Used"}
+                    </div>
+
+                    <div className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                      {coupon.lastUsedAt
+                        ? formatCouponDate(coupon.lastUsedAt)
+                        : isAr
+                          ? "لم يُستخدم"
+                          : "Never"}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-slate-100 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-800/50">
+                  <div className="mb-2 flex items-center gap-1 text-[10px] font-bold text-slate-400">
+                    <CalendarDays className="h-3.5 w-3.5" />
+                    {isAr ? "فترة الصلاحية" : "Validity"}
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3 text-xs">
+                    <div>
+                      <div className="text-[9px] font-bold uppercase tracking-wider text-slate-400">
+                        {isAr ? "من" : "From"}
+                      </div>
+                      <div className="mt-0.5 font-bold text-slate-700 dark:text-slate-300">
+                        {formatCouponDate(coupon.validFrom)}
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="text-[9px] font-bold uppercase tracking-wider text-slate-400">
+                        {isAr ? "إلى" : "Until"}
+                      </div>
+                      <div className="mt-0.5 font-bold text-slate-700 dark:text-slate-300">
+                        {formatCouponDate(coupon.validUntil)}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {Number(coupon.usageLimit || 0) > 0 && (
+                  <div>
+                    <div className="mb-1 flex items-center justify-between text-[10px] font-bold text-slate-400">
+                      <span>
+                        {isAr ? "نسبة الاستهلاك" : "Redemption Progress"}
+                      </span>
+
+                      <span>
+                        {Math.min(
+                          100,
+                          Math.round(
+                            (Number(coupon.usageCount || 0) /
+                              Number(coupon.usageLimit || 1)) *
+                              100
+                          )
+                        )}
+                        %
+                      </span>
+                    </div>
+
+                    <div className="h-2 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
+                      <div
+                        className="h-full rounded-full bg-indigo-500 transition-all"
+                        style={{
+                          width: `${Math.min(
+                            100,
+                            (Number(coupon.usageCount || 0) /
+                              Number(coupon.usageLimit || 1)) *
+                              100
+                          )}%`,
+                        }}
+                      />
+                    </div>
+                  </div>
+                )}
 
                 <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between">
                   <div className="flex items-center gap-1.5">
