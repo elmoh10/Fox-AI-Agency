@@ -322,6 +322,45 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
               <Award className="h-4 w-4 text-amber-500" />
               <span>{isAr ? "تقييمات وآراء الوكالة" : "Agency Service Ratings"}</span>
             </button>
+
+            {/* Agency-only AI tools */}
+            <div className="mt-3 pt-3 border-t border-slate-200 dark:border-slate-800">
+              <p className="px-2 pb-2 text-[10px] font-semibold text-slate-500 uppercase tracking-wider">
+                {isAr ? "أدوات الوكالة والذكاء الاصطناعي" : "Agency AI & Growth Tools"}
+              </p>
+            </div>
+
+            <button
+              onClick={() => setActiveTab("client_marketing_agent")}
+              className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-xs font-semibold transition-colors ${
+                activeTab === "client_marketing_agent"
+                  ? "bg-orange-600/10 text-orange-600 dark:bg-orange-500/20 dark:text-orange-400"
+                  : "text-slate-600 dark:text-slate-400 hover:bg-slate-200/60 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+              }`}
+            >
+              <Megaphone className="h-4 w-4 text-orange-500" />
+              <span>
+                {isAr
+                  ? "تسويق الوكالة والسوشيال ميديا"
+                  : "Agency Social Marketing"}
+              </span>
+            </button>
+
+            <button
+              onClick={() => setActiveTab("client_ai_analytics")}
+              className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-xs font-semibold transition-colors ${
+                activeTab === "client_ai_analytics"
+                  ? "bg-blue-600/10 text-blue-600 dark:bg-blue-500/20 dark:text-blue-400"
+                  : "text-slate-600 dark:text-slate-400 hover:bg-slate-200/60 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+              }`}
+            >
+              <BarChart2 className="h-4 w-4 text-blue-500" />
+              <span>
+                {isAr
+                  ? "تحليلات الذكاء الاصطناعي للوكالة"
+                  : "Agency AI Analytics"}
+              </span>
+            </button>
           </div>
         )}
 
@@ -329,7 +368,11 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
         <div className="space-y-1">
           <div className="py-1 px-2">
             <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">
-              {currentWorkspace?.name || (isAr ? "مساحة عمل المشترك" : "Client Workspace")}
+              {isSuperAdmin
+                ? isAr
+                  ? `🏢 إدارة المنشأة: ${currentWorkspace?.name || "بدون منشأة محددة"}`
+                  : `🏢 Workspace: ${currentWorkspace?.name || "No workspace selected"}`
+                : currentWorkspace?.name || (isAr ? "مساحة عمل المشترك" : "Client Workspace")}
             </p>
           </div>
 
@@ -553,33 +596,9 @@ export const Sidebar: React.FC<SidebarProps> = ({ activeTab, setActiveTab }) => 
             <span>{isAr ? "مستشار فوكس الذكي" : "Smart Fox Advisor"}</span>
           </button>
 
-          {isSuperAdmin && (
-<button
-            onClick={() => setActiveTab("client_marketing_agent")}
-            className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-xs font-semibold transition-colors ${
-              activeTab === "client_marketing_agent"
-                ? "bg-orange-600/10 text-orange-600 dark:bg-orange-500/20 dark:text-orange-400"
-                : "text-slate-600 dark:text-slate-400 hover:bg-slate-200/60 dark:hover:bg-slate-800 dark:hover:text-slate-200"
-            }`}
-          >
-            <Megaphone className="h-4 w-4 text-orange-500" />
-            <span>{isAr ? "تسويق الوكالة والسوشيال ميديا" : "Social Marketing Agent"}</span>
-          </button>
-)}
 
-          {isSuperAdmin && (
-<button
-            onClick={() => setActiveTab("client_ai_analytics")}
-            className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-xs font-semibold transition-colors ${
-              activeTab === "client_ai_analytics"
-                ? "bg-blue-600/10 text-blue-600 dark:bg-blue-500/20 dark:text-blue-400"
-                : "text-slate-600 dark:text-slate-400 hover:bg-slate-200/60 dark:hover:bg-slate-800 dark:hover:text-slate-200"
-            }`}
-          >
-            <BarChart2 className="h-4 w-4" />
-            <span>{isAr ? "تحليلات الذكاء الاصطناعي" : "AI Analytics"}</span>
-          </button>
-)}
+
+
 
           <button
             onClick={() => setActiveTab("client_integrations")}
