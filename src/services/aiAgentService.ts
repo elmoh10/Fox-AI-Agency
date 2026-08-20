@@ -2191,6 +2191,190 @@ ${industryContext || "Standard business inquiry catalog."}
               };
             }
 
+            // ===============================================
+            // RESOLVE PENDING COUPON + REAL CLINIC PRICE
+            // ===============================================
+            let bookingService: any = null;
+
+            let bookingFinancials:
+              | {
+                  couponCode: string;
+                  originalAmount: number;
+                  discountAmount: number;
+                  finalAmount: number;
+                }
+              | null = null;
+
+            // Find the most recent validated coupon that has not
+            // already been redeemed in this conversation.
+            let lastValidatedCouponIndex = -1;
+            let lastRedeemedCouponIndex = -1;
+            let pendingCouponCode = "";
+
+            bookingCtx.messages.forEach((memoryMessage, index) => {
+              const text =
+                String(memoryMessage.text || "");
+
+              const validated =
+                text.match(
+                  /\[FOX_COUPON_VALIDATED:([A-Z0-9_-]+)\]/i
+                );
+
+              if (validated?.[1]) {
+                lastValidatedCouponIndex = index;
+                pendingCouponCode =
+                  String(validated[1])
+                    .trim()
+                    .toUpperCase();
+              }
+
+              if (
+                /\[FOX_COUPON_REDEEMED:[A-Z0-9_-]+\]/i.test(
+                  text
+                )
+              ) {
+                lastRedeemedCouponIndex = index;
+              }
+            });
+
+            if (
+              lastValidatedCouponIndex <=
+              lastRedeemedCouponIndex
+            ) {
+              pendingCouponCode = "";
+            }
+
+            if (pendingCouponCode) {
+              const clinicServices =
+                await workspaceDataService.getClinicServices(
+                  workspace.id
+                );
+
+              const availableServices =
+                clinicServices.filter(
+                  (service: any) =>
+                    service.available !== false &&
+                    Number(service.price || 0) > 0
+                );
+
+              // Try explicit service selection from recent messages.
+              const recentCustomerText =
+                bookingCtx.messages
+                  .filter(
+                    (memoryMessage) =>
+                      memoryMessage.sender === "user"
+                  )
+                  .slice(-10)
+                  .map(
+                    (memoryMessage) =>
+                      String(
+                        memoryMessage.text || ""
+                      ).toLowerCase()
+                  )
+                  .join(" ");
+
+              bookingService =
+                availableServices.find(
+                  (service: any) =>
+                    service.name &&
+                    recentCustomerText.includes(
+                      String(
+                        service.name
+                      ).toLowerCase()
+                    )
+                ) || null;
+
+              // If the business has exactly one priced clinic
+              // service, it is safe to use it for a generic booking.
+              if (
+                !bookingService &&
+                availableServices.length === 1
+              ) {
+                bookingService =
+                  availableServices[0];
+              }
+
+              if (!bookingService) {
+                const serviceNames =
+                  availableServices
+                    .map(
+                      (service: any) =>
+                        `• ${service.name} - ${service.price} EGP`
+                    )
+                    .join("\n");
+
+                const msg =
+                  messageLang === "ar"
+                    ? (
+                        "🎟️ كود الخصم صالح، لكن لازم أحدد الخدمة قبل تطبيق الخصم.\n\n" +
+                        (
+                          serviceNames ||
+                          "لا توجد خدمات مسعرة متاحة حالياً."
+                        ) +
+                        "\n\nاكتب اسم الخدمة المطلوبة."
+                      )
+                    : (
+                        "🎟️ Your coupon is valid, but I need to know which service you are booking before applying the discount.\n\n" +
+                        (
+                          serviceNames ||
+                          "No priced services are currently available."
+                        )
+                      );
+
+                return {
+                  response: msg,
+                  aiResponse: msg,
+                  detectedLanguage: messageLang,
+                  source:
+                    "firestore:coupon_service_required",
+                  suggestedActions: [],
+                };
+              }
+
+              const couponValidation =
+                await couponService.validateCoupon(
+                  workspace.id,
+                  pendingCouponCode,
+                  Number(bookingService.price)
+                );
+
+              if (
+                !couponValidation.valid ||
+                couponValidation.originalAmount === undefined ||
+                couponValidation.discountAmount === undefined ||
+                couponValidation.finalAmount === undefined
+              ) {
+                const msg =
+                  messageLang === "ar"
+                    ? `تعذر تطبيق كود الخصم ${pendingCouponCode} على الحجز. تحقق من صلاحية الكود وحاول مرة أخرى.`
+                    : `Coupon ${pendingCouponCode} could not be applied to this booking.`;
+
+                return {
+                  response: msg,
+                  aiResponse: msg,
+                  detectedLanguage: messageLang,
+                  source:
+                    "firestore:coupon_booking_invalid",
+                  suggestedActions: [],
+                };
+              }
+
+              bookingFinancials = {
+                couponCode:
+                  pendingCouponCode,
+                originalAmount:
+                  couponValidation.originalAmount,
+                discountAmount:
+                  couponValidation.discountAmount,
+                finalAmount:
+                  couponValidation.finalAmount,
+              };
+
+              console.log(
+                `💰 [FOX Booking Price] Workspace=${workspace.id} | Service=${bookingService.name} | Original=${bookingFinancials.originalAmount} | Coupon=${pendingCouponCode} | Discount=${bookingFinancials.discountAmount} | Final=${bookingFinancials.finalAmount}`
+              );
+            }
+
             const lead =
               await workspaceDataService.upsertLead(
                 workspace.id,
@@ -2211,9 +2395,105 @@ ${industryContext || "Standard business inquiry catalog."}
                   date: bookingDate,
                   time: bookingTime,
                   channel,
-                  sessionId: params.sessionId
+                  sessionId: params.sessionId,
+
+                  serviceId:
+                    bookingService?.id,
+                  serviceName:
+                    bookingService?.name,
+
+                  // Store the real base price immediately.
+                  // Coupon fields are persisted only after
+                  // redeemCoupon succeeds.
+                  originalAmount:
+                    bookingFinancials?.originalAmount,
                 }
               );
+
+            let couponApplied = false;
+            let couponRedemptionId = "";
+
+            if (
+              bookingFinancials &&
+              bookingService
+            ) {
+              try {
+                const redemption: any =
+                  await couponService.redeemCoupon({
+                    workspaceId:
+                      workspace.id,
+                    code:
+                      bookingFinancials.couponCode,
+                    customerName,
+                    customerPhone:
+                      phone,
+                    channel,
+                    sessionId:
+                      params.sessionId,
+                    transactionType:
+                      "appointment",
+                    transactionId:
+                      String(appointment.id),
+                    originalAmount:
+                      bookingFinancials.originalAmount,
+                  });
+
+                if (
+                  redemption?.redeemed &&
+                  redemption?.redemptionId
+                ) {
+                  couponApplied = true;
+
+                  couponRedemptionId =
+                    String(
+                      redemption.redemptionId
+                    );
+
+                  await workspaceDataService.updateAppointmentFinancials(
+                    workspace.id,
+                    String(appointment.id),
+                    {
+                      serviceId:
+                        bookingService.id,
+                      serviceName:
+                        bookingService.name,
+                      originalAmount:
+                        bookingFinancials.originalAmount,
+                      couponCode:
+                        bookingFinancials.couponCode,
+                      discountAmount:
+                        bookingFinancials.discountAmount,
+                      finalAmount:
+                        bookingFinancials.finalAmount,
+                      couponRedemptionId,
+                    }
+                  );
+
+                  await sharedMemoryService.appendMessage(
+                    workspace.id,
+                    params.sessionId,
+                    {
+                      sender: "bot",
+                      text:
+                        `[FOX_COUPON_REDEEMED:${bookingFinancials.couponCode}] Redemption=${couponRedemptionId}`,
+                      time:
+                        new Date().toISOString(),
+                      agentRole:
+                        "Sales",
+                    }
+                  );
+
+                  console.log(
+                    `✅ [FOX Booking Coupon] Applied | Workspace=${workspace.id} | Appointment=${appointment.id} | Code=${bookingFinancials.couponCode} | Redemption=${couponRedemptionId}`
+                  );
+                }
+              } catch (couponRedeemError) {
+                console.error(
+                  `❌ [FOX Booking Coupon] Redemption failed | Workspace=${workspace.id} | Appointment=${appointment.id}`,
+                  couponRedeemError
+                );
+              }
+            }
 
             await markBookingConversion(
               workspace.id,
@@ -2256,10 +2536,52 @@ ${industryContext || "Standard business inquiry catalog."}
             const bookingLanguage =
               this.detectLanguage(originalBookingRequest);
 
-            const confirmation =
+            let confirmation =
               bookingLanguage === "ar"
-                ? `✅ تم تأكيد حجزك بنجاح 🎉\n\nالاسم: ${customerName}\nالتاريخ: ${bookingDate}\nالوقت: ${bookingTime}\n\nنتشرف بخدمتك في ${workspace.name || "العيادة"}.`
+                ? `✅ تم تأكيد حجزك بنجاح 🎉\n\nالاسم: ${customerName}\nالتاريخ: ${bookingDate}\nالوقت: ${bookingTime}`
                 : `✅ Your appointment has been confirmed successfully.\n\nName: ${customerName}\nDate: ${bookingDate}\nTime: ${bookingTime}`;
+
+            if (
+              bookingService &&
+              bookingFinancials
+            ) {
+              if (couponApplied) {
+                confirmation +=
+                  bookingLanguage === "ar"
+                    ? (
+                        `\n\n🏥 الخدمة: ${bookingService.name}` +
+                        `\n💵 السعر الأصلي: ${bookingFinancials.originalAmount} جنيه` +
+                        `\n🎟️ كود الخصم: ${bookingFinancials.couponCode}` +
+                        `\n💰 قيمة الخصم: ${bookingFinancials.discountAmount} جنيه` +
+                        `\n✅ الإجمالي بعد الخصم: ${bookingFinancials.finalAmount} جنيه`
+                      )
+                    : (
+                        `\n\nService: ${bookingService.name}` +
+                        `\nOriginal price: ${bookingFinancials.originalAmount} EGP` +
+                        `\nCoupon: ${bookingFinancials.couponCode}` +
+                        `\nDiscount: ${bookingFinancials.discountAmount} EGP` +
+                        `\nFinal total: ${bookingFinancials.finalAmount} EGP`
+                      );
+              } else {
+                confirmation +=
+                  bookingLanguage === "ar"
+                    ? (
+                        `\n\n🏥 الخدمة: ${bookingService.name}` +
+                        `\n💵 السعر: ${bookingFinancials.originalAmount} جنيه` +
+                        `\n⚠️ تعذر تسجيل الخصم، لذلك لم يتم خصم قيمة الكوبون من الحجز.`
+                      )
+                    : (
+                        `\n\nService: ${bookingService.name}` +
+                        `\nPrice: ${bookingFinancials.originalAmount} EGP` +
+                        `\nThe coupon could not be redeemed, so no discount was applied.`
+                      );
+              }
+            }
+
+            if (bookingLanguage === "ar") {
+              confirmation +=
+                `\n\nنتشرف بخدمتك في ${workspace.name || "العيادة"}.`;
+            }
 
             await sharedMemoryService.appendMessage(
               workspace.id,

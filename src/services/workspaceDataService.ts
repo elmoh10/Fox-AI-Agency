@@ -33,6 +33,20 @@ export const workspaceDataService = {
       time: string;
       channel?: string;
       sessionId?: string;
+
+      // Optional clinic/service identity
+      doctorId?: string;
+      doctorName?: string;
+      specialty?: string;
+      serviceId?: string;
+      serviceName?: string;
+
+      // Financial snapshot at booking time
+      originalAmount?: number;
+      couponCode?: string;
+      discountAmount?: number;
+      finalAmount?: number;
+      couponRedemptionId?: string;
     }
   ) {
     const todayISO = new Date().toISOString().slice(0, 10);
@@ -61,8 +75,27 @@ export const workspaceDataService = {
       patientName: data.customerName,
       patientPhone: data.phone,
       timeSlot: data.time,
-      doctorName: "AI Booking",
-      specialty: "General",
+      doctorName: data.doctorName || "AI Booking",
+      specialty: data.specialty || "General",
+      doctorId: data.doctorId,
+      serviceId: data.serviceId,
+      serviceName: data.serviceName,
+
+      // Immutable financial snapshot for reporting / CRM.
+      originalAmount:
+        data.originalAmount !== undefined
+          ? Number(data.originalAmount)
+          : undefined,
+      couponCode: data.couponCode,
+      discountAmount:
+        data.discountAmount !== undefined
+          ? Number(data.discountAmount)
+          : undefined,
+      finalAmount:
+        data.finalAmount !== undefined
+          ? Number(data.finalAmount)
+          : undefined,
+      couponRedemptionId: data.couponRedemptionId,
 
       channel: data.channel || "telegram",
       sessionId: data.sessionId,
@@ -82,6 +115,76 @@ export const workspaceDataService = {
     await setDoc(doc(db, "appointments", id), appointment);
 
     return appointment;
+  },
+
+  async getClinicServices(
+    workspaceId: string
+  ) {
+    const q = query(
+      collection(db, "clinicServices"),
+      where("workspaceId", "==", workspaceId)
+    );
+
+    const snapshot = await getDocs(q);
+
+    return snapshot.docs.map((snapshotDoc) => ({
+      id: snapshotDoc.id,
+      ...snapshotDoc.data(),
+    })) as any[];
+  },
+
+  async getDoctors(
+    workspaceId: string
+  ) {
+    const q = query(
+      collection(db, "doctors"),
+      where("workspaceId", "==", workspaceId)
+    );
+
+    const snapshot = await getDocs(q);
+
+    return snapshot.docs.map((snapshotDoc) => ({
+      id: snapshotDoc.id,
+      ...snapshotDoc.data(),
+    })) as any[];
+  },
+
+  async updateAppointmentFinancials(
+    workspaceId: string,
+    appointmentId: string,
+    data: {
+      originalAmount?: number;
+      couponCode?: string;
+      discountAmount?: number;
+      finalAmount?: number;
+      couponRedemptionId?: string;
+      serviceId?: string;
+      serviceName?: string;
+    }
+  ) {
+    const payload = sanitizeForFirestore({
+      ...data,
+      updatedAt: new Date().toISOString(),
+    });
+
+    await updateDoc(
+      doc(
+        db,
+        "workspaces",
+        workspaceId,
+        "appointments",
+        appointmentId
+      ),
+      payload
+    );
+
+    // Compatibility collection used by the current dashboard.
+    await updateDoc(
+      doc(db, "appointments", appointmentId),
+      payload
+    );
+
+    return payload;
   },
 
   async isAppointmentAvailable(

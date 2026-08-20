@@ -172,6 +172,17 @@ export interface Appointment {
   notes?: string;
   doctorId?: string;
   channel?: string;
+
+  // Optional service identity
+  serviceId?: string;
+  serviceName?: string;
+
+  // Financial snapshot
+  originalAmount?: number;
+  couponCode?: string;
+  discountAmount?: number;
+  finalAmount?: number;
+  couponRedemptionId?: string;
 }
 
 export interface Doctor {
