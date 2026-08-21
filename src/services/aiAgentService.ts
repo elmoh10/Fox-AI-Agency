@@ -108,6 +108,47 @@ async function markBookingConversion(
   }
 }
 
+function extractCanonicalExternalCustomerId(
+  channel?: string,
+  sessionId?: string
+): string | undefined {
+  const cleanChannel =
+    String(channel || "")
+      .trim()
+      .toLowerCase();
+
+  const cleanSession =
+    String(sessionId || "")
+      .trim();
+
+  if (!cleanSession) {
+    return undefined;
+  }
+
+  /*
+   * FOX Telegram session format:
+   * telegram:<workspaceId>:<chatId>
+   */
+  if (cleanChannel === "telegram") {
+    const parts = cleanSession.split(":");
+
+    if (
+      parts.length >= 3 &&
+      parts[0].toLowerCase() === "telegram"
+    ) {
+      const chatId =
+        String(parts[parts.length - 1] || "")
+          .trim();
+
+      if (chatId) {
+        return chatId;
+      }
+    }
+  }
+
+  return undefined;
+}
+
 export class AiAgentService {
 
   // =========================================================
@@ -2448,7 +2489,13 @@ ${industryContext || "Standard business inquiry catalog."}
                   name: customerName,
                   phone,
                   channel,
-                  sessionId: params.sessionId
+                  sessionId: params.sessionId,
+
+                  externalCustomerId:
+                    extractCanonicalExternalCustomerId(
+                      channel,
+                      params.sessionId
+                    )
                 }
               );
 
@@ -3545,7 +3592,13 @@ DATE SAFETY RULES:
                               name: freshName,
                               phone: freshPhone,
                               channel,
-                              sessionId: params.sessionId
+                              sessionId: params.sessionId,
+
+                  externalCustomerId:
+                    extractCanonicalExternalCustomerId(
+                      channel,
+                      params.sessionId
+                    )
                             }
                           );
 
@@ -3797,7 +3850,13 @@ DATE SAFETY RULES:
                             phone,
                             channel,
                             sessionId:
-                              params.sessionId
+                              params.sessionId,
+
+                  externalCustomerId:
+                    extractCanonicalExternalCustomerId(
+                      channel,
+                      params.sessionId
+                    )
                           }
                         );
 
@@ -4171,7 +4230,13 @@ DATE SAFETY RULES:
                       name,
                       phone,
                       channel,
-                      sessionId: params.sessionId
+                      sessionId: params.sessionId,
+
+                  externalCustomerId:
+                    extractCanonicalExternalCustomerId(
+                      channel,
+                      params.sessionId
+                    )
                     }
                   );
 

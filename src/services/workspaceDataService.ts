@@ -2,6 +2,7 @@ import { db, sanitizeForFirestore } from "./firebase";
 import {
   collection,
   doc,
+  getDoc,
   getDocs,
   query,
   setDoc,
@@ -232,6 +233,11 @@ export const workspaceDataService = {
       phone: string;
       channel?: string;
       sessionId?: string;
+
+      // Canonical external identity.
+      // Telegram example:
+      // externalCustomerId = Telegram chat/user id.
+      externalCustomerId?: string;
     }
   ) {
     const ref = collection(
@@ -241,40 +247,242 @@ export const workspaceDataService = {
       "crmLeads"
     );
 
-    const existingQuery = query(
-      ref,
-      where("phone", "==", data.phone)
-    );
+    const channel =
+      String(data.channel || "telegram")
+        .trim()
+        .toLowerCase();
 
-    const existing = await getDocs(existingQuery);
+    const externalCustomerId =
+      String(data.externalCustomerId || "")
+        .trim();
 
-    if (!existing.empty) {
-      return existing.docs[0].data();
+    const normalizedPhone =
+      normalizePhone(data.phone);
+
+    // -------------------------------------------------------
+    // 1) Prefer canonical channel identity.
+    //
+    // Telegram CRM already uses:
+    // telegram_<chatId>
+    //
+    // Reuse that exact customer instead of creating lead_xxx.
+    // -------------------------------------------------------
+    if (externalCustomerId) {
+      const canonicalId =
+        `${channel}_${externalCustomerId}`;
+
+      const canonicalRef = doc(
+        db,
+        "workspaces",
+        workspaceId,
+        "crmLeads",
+        canonicalId
+      );
+
+      const canonicalSnap =
+        await getDoc(canonicalRef);
+
+      if (canonicalSnap.exists()) {
+        const existingLead: any =
+          canonicalSnap.data();
+
+        const updates =
+          sanitizeForFirestore({
+            name:
+              data.name ||
+              existingLead.name,
+            phone:
+              data.phone ||
+              existingLead.phone,
+            phoneNormalized:
+              normalizedPhone ||
+              existingLead.phoneNormalized,
+            channel,
+            sessionId:
+              data.sessionId ||
+              existingLead.sessionId,
+            externalCustomerId,
+            updatedAt:
+              new Date().toISOString(),
+          });
+
+        await setDoc(
+          canonicalRef,
+          updates,
+          { merge: true }
+        );
+
+        return {
+          ...existingLead,
+          ...updates,
+          id: canonicalId,
+          workspaceId,
+        };
+      }
     }
 
-    const id = makeId("lead");
+    // -------------------------------------------------------
+    // 2) Phone fallback.
+    // Search normalized phone first.
+    // -------------------------------------------------------
+    if (normalizedPhone) {
+      const normalizedQuery = query(
+        ref,
+        where(
+          "phoneNormalized",
+          "==",
+          normalizedPhone
+        )
+      );
 
-    const lead = sanitizeForFirestore({
-      id,
-      workspaceId,
-      name: data.name,
-      phone: data.phone,
-      phoneNormalized: normalizePhone(data.phone),
-      channel: data.channel || "telegram",
-      sessionId: data.sessionId,
-      status: "New",
-      source: "ai_agent",
-      createdAt: new Date().toISOString(),
-    });
+      const normalizedExisting =
+        await getDocs(normalizedQuery);
 
-    // Tenant-isolated CRM
+      if (!normalizedExisting.empty) {
+        const existingDoc =
+          normalizedExisting.docs[0];
+
+        const existingLead: any =
+          existingDoc.data();
+
+        const updates =
+          sanitizeForFirestore({
+            name:
+              data.name ||
+              existingLead.name,
+            phone:
+              data.phone ||
+              existingLead.phone,
+            phoneNormalized:
+              normalizedPhone,
+            channel:
+              channel ||
+              existingLead.channel,
+            sessionId:
+              data.sessionId ||
+              existingLead.sessionId,
+            externalCustomerId:
+              externalCustomerId ||
+              existingLead.externalCustomerId,
+            updatedAt:
+              new Date().toISOString(),
+          });
+
+        await setDoc(
+          existingDoc.ref,
+          updates,
+          { merge: true }
+        );
+
+        return {
+          ...existingLead,
+          ...updates,
+          id: existingDoc.id,
+          workspaceId,
+        };
+      }
+    }
+
+    // Compatibility with older leads that only have phone.
+    if (data.phone) {
+      const legacyQuery = query(
+        ref,
+        where("phone", "==", data.phone)
+      );
+
+      const legacyExisting =
+        await getDocs(legacyQuery);
+
+      if (!legacyExisting.empty) {
+        const existingDoc =
+          legacyExisting.docs[0];
+
+        const existingLead: any =
+          existingDoc.data();
+
+        const updates =
+          sanitizeForFirestore({
+            name:
+              data.name ||
+              existingLead.name,
+            phone: data.phone,
+            phoneNormalized:
+              normalizedPhone,
+            channel,
+            sessionId:
+              data.sessionId ||
+              existingLead.sessionId,
+            externalCustomerId:
+              externalCustomerId ||
+              existingLead.externalCustomerId,
+            updatedAt:
+              new Date().toISOString(),
+          });
+
+        await setDoc(
+          existingDoc.ref,
+          updates,
+          { merge: true }
+        );
+
+        return {
+          ...existingLead,
+          ...updates,
+          id: existingDoc.id,
+          workspaceId,
+        };
+      }
+    }
+
+    // -------------------------------------------------------
+    // 3) New customer.
+    //
+    // If channel identity is known, create the canonical ID
+    // immediately. Otherwise use legacy lead_xxx fallback.
+    // -------------------------------------------------------
+    const id =
+      externalCustomerId
+        ? `${channel}_${externalCustomerId}`
+        : makeId("lead");
+
+    const lead =
+      sanitizeForFirestore({
+        id,
+        workspaceId,
+        name: data.name,
+        phone: data.phone,
+        phoneNormalized:
+          normalizedPhone,
+        channel,
+        sessionId:
+          data.sessionId,
+        externalCustomerId:
+          externalCustomerId ||
+          undefined,
+        status: "New",
+        source: "ai_agent",
+        createdAt:
+          new Date().toISOString(),
+        updatedAt:
+          new Date().toISOString(),
+      });
+
     await setDoc(
-      doc(db, "workspaces", workspaceId, "crmLeads", id),
+      doc(
+        db,
+        "workspaces",
+        workspaceId,
+        "crmLeads",
+        id
+      ),
       lead
     );
 
-    // Compatibility with current dashboard
-    await setDoc(doc(db, "crmLeads", id), lead);
+    // Legacy root compatibility.
+    await setDoc(
+      doc(db, "crmLeads", id),
+      lead
+    );
 
     return lead;
   },

@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { useApp } from "../../context/AppContext";
 import { CustomerLead } from "../../types";
 import {
@@ -302,6 +303,9 @@ export const ClientCRM: React.FC = () => {
     let ratingItems: CustomerTimelineItem[] = [];
     let couponItems: CustomerTimelineItem[] = [];
 
+    // CRM operational lifecycle events.
+    let crmEventItems: CustomerTimelineItem[] = [];
+
     const publishTimeline = () => {
       const merged = [
         ...messageItems,
@@ -309,6 +313,7 @@ export const ClientCRM: React.FC = () => {
         ...complaintItems,
         ...ratingItems,
         ...couponItems,
+        ...crmEventItems,
       ].sort((a, b) => {
         return (
           new Date(b.createdAt || 0).getTime() -
@@ -546,6 +551,127 @@ export const ClientCRM: React.FC = () => {
     );
 
     unsubscribers.push(unsubscribeComplaints);
+
+    // --------------------------------------------------------
+    // FOX CRM LIFECYCLE EVENTS
+    //
+    // Source:
+    // workspaces/{workspaceId}/crmLeads/{leadId}/events
+    //
+    // Intent changes, human takeover, return to AI,
+    // CRM conversion and future operational events.
+    // --------------------------------------------------------
+
+    const crmEventsRef = collection(
+      db,
+      "workspaces",
+      workspaceId,
+      "crmLeads",
+      selectedLead.id,
+      "events"
+    );
+
+    const crmEventsQuery = query(
+      crmEventsRef,
+      orderBy("createdAt", "asc")
+    );
+
+    const unsubscribeCrmEvents = onSnapshot(
+      crmEventsQuery,
+      (snapshot) => {
+        crmEventItems = snapshot.docs.map((snap) => {
+          const data: any = snap.data();
+
+          const eventType = String(
+            data.type || "system"
+          );
+
+          const defaultTitles: Record<string, string> = {
+            intent_changed: "Customer Intent Changed",
+            human_takeover: "Human Takeover",
+            returned_to_ai: "Returned To FOX AI",
+            crm_conversion: "CRM Conversion",
+            appointment_booked: "Appointment Booked",
+            complaint_created: "Complaint Created",
+            coupon_redeemed: "Coupon Redeemed",
+            rating_submitted: "Service Rating Submitted",
+            status_changed: "CRM Status Changed",
+            system: "CRM Event",
+          };
+
+          const fromValue = String(
+            data.fromValue || ""
+          );
+
+          const toValue = String(
+            data.toValue || ""
+          );
+
+          let description = String(
+            data.description || ""
+          );
+
+          if (
+            !description &&
+            (fromValue || toValue)
+          ) {
+            description =
+              fromValue && toValue
+                ? `${fromValue} → ${toValue}`
+                : fromValue || toValue;
+          }
+
+          return {
+            id: `crm_event_${snap.id}`,
+            type: "system_message" as const,
+
+            title:
+              String(data.title || "") ||
+              defaultTitles[eventType] ||
+              "CRM Event",
+
+            description,
+
+            createdAt:
+              String(
+                data.createdAt ||
+                new Date(0).toISOString()
+              ),
+
+            sender:
+              eventType === "human_takeover"
+                ? "human"
+                : eventType === "returned_to_ai"
+                  ? "ai"
+                  : "system",
+
+            status:
+              toValue ||
+              eventType,
+
+            agentRole:
+              eventType === "returned_to_ai"
+                ? "FOX AI"
+                : undefined,
+          };
+        });
+
+        publishTimeline();
+      },
+      (error) => {
+        console.error(
+          "[FOX CRM Timeline] CRM lifecycle events error:",
+          error
+        );
+
+        crmEventItems = [];
+        publishTimeline();
+      }
+    );
+
+    // Existing effect already cleans every listener
+    // stored inside this array.
+    unsubscribers.push(unsubscribeCrmEvents);
 
     // --------------------------------------------------------
     // SERVICE RATINGS
@@ -948,9 +1074,22 @@ export const ClientCRM: React.FC = () => {
       </div>
 
       {/* Customer 360 Detail Drawer */}
-      {selectedLead && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-sm">
-          <div className="w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-800 dark:bg-slate-900">
+      {selectedLead &&
+        typeof document !== "undefined" &&
+        createPortal(
+          <div
+            className="fixed inset-0 z-[9999] overflow-y-auto bg-slate-950/75 backdrop-blur-sm"
+            onMouseDown={(e) => {
+              if (e.target === e.currentTarget) {
+                setSelectedLead(null);
+              }
+            }}
+          >
+            <div className="flex min-h-full items-start justify-center px-4 pb-10 pt-20 sm:px-6">
+              <div
+                className="relative w-full max-w-3xl rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-800 dark:bg-slate-900 sm:p-7"
+                onMouseDown={(e) => e.stopPropagation()}
+              >
 
             <div className="flex items-start justify-between border-b border-slate-100 pb-4 dark:border-slate-800">
               <div>
@@ -1242,9 +1381,11 @@ export const ClientCRM: React.FC = () => {
 
             </div>
 
-          </div>
-        </div>
-      )}
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
 
       {/* Add Lead Modal */}
       {isAddModalOpen && (

@@ -28,6 +28,7 @@ import { aiAgentService } from "./src/services/aiAgentService";
 import { sharedMemoryService } from "./src/services/sharedMemoryService";
 import { conversationService } from "./src/services/conversationService";
 import { workspaceCrmService } from "./src/services/workspaceCrmService";
+import { crmEventService } from "./src/services/crmEventService";
 import { emailService } from "./src/services/emailService";
 import { TrialLimitManager } from "./src/services/TrialLimitManager";
 import { db } from "./src/services/firebase";
@@ -4804,6 +4805,42 @@ app.post(
         updatedAt: now,
       });
 
+      // -----------------------------------------------------
+      // FOX CRM EVENT: HUMAN -> AI
+      // Only log a real ownership transition.
+      // -----------------------------------------------------
+      if (
+        String(conversation.assignedTo || "")
+          .toLowerCase() === "human"
+      ) {
+        const crmLeadId =
+          String(
+            conversation.crmLeadId || ""
+          ).trim();
+
+        if (crmLeadId) {
+          try {
+            await crmEventService.logReturnToAi({
+              workspaceId,
+              leadId: crmLeadId,
+              channel:
+                conversation.channel ||
+                undefined,
+              sessionId:
+                conversation.sessionId ||
+                undefined,
+              conversationId,
+            });
+          } catch (eventError: any) {
+            console.error(
+              `❌ [FOX CRM Event Return AI] Workspace=${workspaceId} | Conversation=${conversationId}`,
+              eventError?.message ||
+                eventError
+            );
+          }
+        }
+      }
+
       console.log(
         `🤖 [Unified Inbox Return To AI] Workspace=${workspaceId} | Conversation=${conversationId}`
       );
@@ -5011,6 +5048,43 @@ app.post(
           status: "open",
           updatedAt: new Date().toISOString(),
         });
+
+      // -----------------------------------------------------
+      // FOX CRM EVENT: AI -> HUMAN
+      // First human reply creates takeover event.
+      // Additional human replies do not create duplicates.
+      // -----------------------------------------------------
+      if (
+        String(conversation.assignedTo || "")
+          .toLowerCase() !== "human"
+      ) {
+        const crmLeadId =
+          String(
+            conversation.crmLeadId || ""
+          ).trim();
+
+        if (crmLeadId) {
+          try {
+            await crmEventService.logHumanTakeover({
+              workspaceId,
+              leadId: crmLeadId,
+              channel:
+                conversation.channel ||
+                "telegram",
+              sessionId:
+                conversation.sessionId ||
+                `telegram:${workspaceId}:${chatId}`,
+              conversationId,
+            });
+          } catch (eventError: any) {
+            console.error(
+              `❌ [FOX CRM Event Human Takeover] Workspace=${workspaceId} | Conversation=${conversationId}`,
+              eventError?.message ||
+                eventError
+            );
+          }
+        }
+      }
 
       console.log(
         `👤 [Unified Inbox Human Reply] Workspace=${workspaceId} | Conversation=${conversationId} | Chat=${chatId}`

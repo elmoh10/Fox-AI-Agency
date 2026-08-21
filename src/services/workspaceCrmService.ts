@@ -1,5 +1,6 @@
 import { adminDb } from "./firebaseAdmin";
 import { FieldValue } from "firebase-admin/firestore";
+import { crmEventService } from "./crmEventService";
 
 export type CrmChannel =
   | "telegram"
@@ -434,6 +435,46 @@ export const workspaceCrmService = {
       { merge: true }
     );
 
+    // -------------------------------------------------------
+    // FOX CRM EVENT: INTENT CHANGED
+    // Log only a real transition. Repeated messages with the
+    // same intent must not create duplicate journey events.
+    // -------------------------------------------------------
+    const previousIntent =
+      clean(current.lastIntent);
+
+    const nextIntent =
+      clean(intent.intent);
+
+    if (
+      nextIntent &&
+      previousIntent !== nextIntent
+    ) {
+      try {
+        await crmEventService.logIntentChange({
+          workspaceId: cleanWorkspaceId,
+          leadId: cleanLeadId,
+          previousIntent:
+            previousIntent || undefined,
+          newIntent: nextIntent,
+          channel:
+            clean(current.channel) ||
+            undefined,
+          sessionId:
+            clean(current.sessionId) ||
+            undefined,
+          conversationId:
+            clean(current.conversationId) ||
+            undefined,
+        });
+      } catch (eventError: any) {
+        console.error(
+          `❌ [FOX CRM Event Intent] Workspace=${cleanWorkspaceId} | Lead=${cleanLeadId}`,
+          eventError?.message || eventError
+        );
+      }
+    }
+
     console.log(
       `🧠 [FOX CRM Intelligence] Workspace=${cleanWorkspaceId} | Lead=${cleanLeadId} | Intent=${intent.intent} | PhoneCaptured=${Boolean(detectedPhone)}`
     );
@@ -533,6 +574,60 @@ export const workspaceCrmService = {
     console.log(
       `🎯 [FOX CRM Conversion] Workspace=${cleanWorkspaceId} | Lead=${cleanLeadId} | Type=${data.conversionType} | Status=Customer`
     );
+
+    // -------------------------------------------------------
+    // FOX CRM EVENT: CONVERSION
+    // Only create the event when this conversion has not
+    // already been recorded on the lead.
+    // -------------------------------------------------------
+    const previousConversionId =
+      clean((snapshot.data() as any)?.lastConversionId);
+
+    const newConversionId =
+      clean(data.conversionId);
+
+    const previousStatus =
+      clean((snapshot.data() as any)?.status);
+
+    const shouldLogConversion =
+      previousStatus !== "Customer" ||
+      (
+        newConversionId &&
+        previousConversionId !== newConversionId
+      );
+
+    if (shouldLogConversion) {
+      try {
+        await crmEventService.logConversion({
+          workspaceId: cleanWorkspaceId,
+          leadId: cleanLeadId,
+          conversionType:
+            data.conversionType,
+          sourceId:
+            newConversionId || undefined,
+          channel:
+            clean((snapshot.data() as any)?.channel) ||
+            undefined,
+          sessionId:
+            clean((snapshot.data() as any)?.sessionId) ||
+            undefined,
+          conversationId:
+            clean((snapshot.data() as any)?.conversationId) ||
+            undefined,
+          metadata: {
+            customerName:
+              customerName || undefined,
+            customerPhone:
+              customerPhone || undefined,
+          },
+        });
+      } catch (eventError: any) {
+        console.error(
+          `❌ [FOX CRM Event Conversion] Workspace=${cleanWorkspaceId} | Lead=${cleanLeadId}`,
+          eventError?.message || eventError
+        );
+      }
+    }
 
     return {
       id: cleanLeadId,
