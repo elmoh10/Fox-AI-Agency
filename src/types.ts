@@ -62,6 +62,17 @@ export interface Workspace {
   whatsappBusinessAccountId?: string;
   whatsappConnectedAt?: string;
   registrationSource?: string;
+
+  // FOX LAUNCH ONBOARDING V1
+  onboardingStatus?: "in_progress" | "completed";
+  onboardingCompleted?: boolean;
+  onboardingCompletedAt?: string;
+  onboardingStep?: number;
+
+  businessDescription?: string;
+  onboardingAiReady?: boolean;
+  onboardingCatalogReady?: boolean;
+
   googleSheetsAccessToken?: string;
   crmSpreadsheetId?: string;
   externalCrmWebhookUrl?: string;

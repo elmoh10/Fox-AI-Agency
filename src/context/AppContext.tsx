@@ -1256,6 +1256,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       totalAppointments: 0,
       totalComplaints: 0,
       createdAt: new Date().toISOString().split("T")[0],
+
+      // FOX LAUNCH ONBOARDING V1
+      onboardingStatus: "in_progress",
+      onboardingCompleted: false,
+      onboardingStep: 1,
+      businessDescription: "",
+      onboardingAiReady: false,
+      onboardingCatalogReady: false,
+
       aiSettings: {
         agentName: `${workspaceName} AI Assistant`,
         customPrompt: `Assist customers for ${workspaceName}. Be polite and helpful.`,

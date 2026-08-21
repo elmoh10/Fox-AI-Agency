@@ -52,6 +52,11 @@ export const ClientDashboard: React.FC<{ onNavigate: (tab: any) => void }> = ({ 
     knowledgeFacts,
     redeemActivationCode,
     updateTelegramBotToken,
+
+    // FOX LAUNCH ONBOARDING V1
+    updateWorkspaceField,
+    updateAISettings,
+
     addToast,
     language,
   } = useApp();
@@ -95,6 +100,46 @@ export const ClientDashboard: React.FC<{ onNavigate: (tab: any) => void }> = ({ 
   const [showToken, setShowToken] = useState(false);
   const [isSavingToken, setIsSavingToken] = useState(false);
   const [copiedToken, setCopiedToken] = useState(false);
+
+  // =========================================================
+  // FOX LAUNCH ONBOARDING V1
+  // =========================================================
+
+  const [onboardingAgentName, setOnboardingAgentName] =
+    useState(
+      currentWorkspace.aiSettings?.agentName ||
+      `${currentWorkspace.name} AI Assistant`
+    );
+
+  const [onboardingWorkingHours, setOnboardingWorkingHours] =
+    useState(
+      currentWorkspace.aiSettings?.workingHours || ""
+    );
+
+  const [onboardingBusinessDescription, setOnboardingBusinessDescription] =
+    useState(
+      currentWorkspace.businessDescription || ""
+    );
+
+  const [onboardingTelegramToken, setOnboardingTelegramToken] =
+    useState("");
+
+  const [onboardingTelegramBotName, setOnboardingTelegramBotName] =
+    useState(
+      currentWorkspace.telegramBotName ||
+      `@${(currentWorkspace.name || "fox_agent")
+        .toLowerCase()
+        .replace(/\s+/g, "_")}_bot`
+    );
+
+  const [onboardingTelegramSaving, setOnboardingTelegramSaving] =
+    useState(false);
+
+  // Legacy tenants created before Launch Onboarding V1 do not
+  // get blocked. Only new workspaces explicitly carrying
+  // onboardingCompleted=false enter the wizard.
+  const launchOnboardingRequired =
+    currentWorkspace.onboardingCompleted === false;
 
   // Filtered dataset for current workspace
   const workspaceLeads = crmLeads.filter((l) => l.workspaceId === currentWorkspace.id);
@@ -155,6 +200,177 @@ export const ClientDashboard: React.FC<{ onNavigate: (tab: any) => void }> = ({ 
     }, 600);
   };
 
+  // =========================================================
+  // FOX LAUNCH ONBOARDING ACTIONS
+  // =========================================================
+
+  const handleOnboardingSaveBusinessAI = () => {
+    if (!onboardingAgentName.trim()) {
+      addToast(
+        isAr
+          ? "اكتب اسم المساعد الذكي أولاً"
+          : "Please enter the AI assistant name",
+        "error"
+      );
+      return;
+    }
+
+    if (!onboardingWorkingHours.trim()) {
+      addToast(
+        isAr
+          ? "اكتب مواعيد العمل أولاً"
+          : "Please enter your working hours",
+        "error"
+      );
+      return;
+    }
+
+    updateAISettings(currentWorkspace.id, {
+      ...(currentWorkspace.aiSettings || {}),
+      agentName: onboardingAgentName.trim(),
+      workingHours: onboardingWorkingHours.trim(),
+
+      customPrompt:
+        currentWorkspace.aiSettings?.customPrompt ||
+        (
+          onboardingBusinessDescription.trim()
+            ? `Represent ${currentWorkspace.name}. Business description: ${onboardingBusinessDescription.trim()}. Only use approved business data, catalog and knowledge base.`
+            : `Assist customers for ${currentWorkspace.name}. Only use approved business data, catalog and knowledge base.`
+        ),
+    });
+
+    updateWorkspaceField(
+      currentWorkspace.id,
+      {
+        businessDescription:
+          onboardingBusinessDescription.trim(),
+
+        onboardingAiReady: true,
+        onboardingStep: 2,
+      } as any
+    );
+
+    addToast(
+      isAr
+        ? "تم حفظ بيانات النشاط وإعداد المساعد"
+        : "Business and AI setup saved",
+      "success"
+    );
+  };
+
+
+  const handleOnboardingCatalogReady = () => {
+    updateWorkspaceField(
+      currentWorkspace.id,
+      {
+        onboardingCatalogReady: true,
+        onboardingStep: 3,
+      } as any
+    );
+
+    addToast(
+      isAr
+        ? "تم تأكيد تجهيز بيانات النشاط"
+        : "Business catalog marked as ready",
+      "success"
+    );
+  };
+
+
+  const handleOnboardingTelegramConnect = async () => {
+    if (!onboardingTelegramToken.trim()) {
+      addToast(
+        isAr
+          ? "أدخل Telegram Bot Token أولاً"
+          : "Enter your Telegram Bot Token first",
+        "error"
+      );
+      return;
+    }
+
+    try {
+      setOnboardingTelegramSaving(true);
+
+      await updateTelegramBotToken(
+        currentWorkspace.id,
+        onboardingTelegramToken.trim(),
+        onboardingTelegramBotName.trim()
+      );
+
+      updateWorkspaceField(
+        currentWorkspace.id,
+        {
+          onboardingStep: 4,
+        } as any
+      );
+
+      setOnboardingTelegramToken("");
+
+      addToast(
+        isAr
+          ? "تم ربط Telegram بنجاح"
+          : "Telegram connected successfully",
+        "success"
+      );
+    } catch (error) {
+      console.error(
+        "[FOX Launch Onboarding] Telegram:",
+        error
+      );
+
+      addToast(
+        isAr
+          ? "تعذر ربط Telegram. راجع الـToken."
+          : "Telegram connection failed. Check the token.",
+        "error"
+      );
+    } finally {
+      setOnboardingTelegramSaving(false);
+    }
+  };
+
+
+  const handleOnboardingGoLive = () => {
+    const aiReady =
+      Boolean(currentWorkspace.onboardingAiReady);
+
+    const catalogReady =
+      Boolean(currentWorkspace.onboardingCatalogReady);
+
+    const telegramReady =
+      currentWorkspace.telegramBotStatus === "connected";
+
+    if (!aiReady || !catalogReady || !telegramReady) {
+      addToast(
+        isAr
+          ? "أكمل خطوات الإعداد المطلوبة قبل تشغيل FOX"
+          : "Complete the required setup before going live",
+        "error"
+      );
+
+      return;
+    }
+
+    updateWorkspaceField(
+      currentWorkspace.id,
+      {
+        onboardingStatus: "completed",
+        onboardingCompleted: true,
+        onboardingCompletedAt:
+          new Date().toISOString(),
+        onboardingStep: 5,
+      } as any
+    );
+
+    addToast(
+      isAr
+        ? "🚀 تم تجهيز FOX للعمل مع العملاء!"
+        : "🚀 FOX is ready to serve customers!",
+      "success"
+    );
+  };
+
+
   const weeklyTraffic = [
     { day: isAr ? "الإثنين" : "Mon", Telegram: 24, WhatsApp: 45 },
     { day: isAr ? "الثلاثاء" : "Tue", Telegram: 30, WhatsApp: 62 },
@@ -167,6 +383,434 @@ export const ClientDashboard: React.FC<{ onNavigate: (tab: any) => void }> = ({ 
 
   return (
     <div className="space-y-6 animate-fade-in">
+
+      {/* =====================================================
+          FOX LAUNCH ONBOARDING V1
+          Only new tenants are required to complete this flow.
+          Legacy tenants remain unaffected.
+      ====================================================== */}
+
+      {launchOnboardingRequired && (
+        <div className="rounded-3xl border border-orange-200 bg-gradient-to-br from-white via-orange-50/40 to-amber-50/70 shadow-xl overflow-hidden dark:border-orange-500/20 dark:from-slate-900 dark:via-slate-900 dark:to-orange-950/20">
+
+          {/* Header */}
+          <div className="border-b border-orange-100 p-6 sm:p-7 dark:border-orange-500/10">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+
+              <div className="flex items-center gap-4">
+                <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-orange-500 text-white shadow-lg shadow-orange-500/20">
+                  <Bot className="h-6 w-6" />
+                </div>
+
+                <div>
+                  <h2 className="text-xl font-black text-slate-900 dark:text-white">
+                    {isAr
+                      ? "جهّز FOX لاستقبال عملائك"
+                      : "Launch your FOX AI Agent"}
+                  </h2>
+
+                  <p className="mt-1 text-xs font-medium text-slate-500 dark:text-slate-400">
+                    {isAr
+                      ? "أكمل الإعداد السريع مرة واحدة، وبعدها يبدأ الوكيل في خدمة عملائك."
+                      : "Complete this one-time setup, then your AI agent is ready for customers."}
+                  </p>
+                </div>
+              </div>
+
+              <span className="self-start rounded-full border border-orange-200 bg-orange-100 px-3 py-1.5 text-[10px] font-black uppercase text-orange-700 dark:border-orange-500/20 dark:bg-orange-500/10 dark:text-orange-400">
+                FOX Launch Setup
+              </span>
+            </div>
+
+            {/* Progress */}
+            <div className="mt-6 grid grid-cols-4 gap-2">
+              {[
+                {
+                  label: isAr ? "النشاط والـAI" : "Business & AI",
+                  done: Boolean(currentWorkspace.onboardingAiReady),
+                },
+                {
+                  label: isAr ? "الكتالوج" : "Catalog",
+                  done: Boolean(currentWorkspace.onboardingCatalogReady),
+                },
+                {
+                  label: "Telegram",
+                  done:
+                    currentWorkspace.telegramBotStatus === "connected",
+                },
+                {
+                  label: isAr ? "تشغيل" : "Go Live",
+                  done: false,
+                },
+              ].map((step, index) => (
+                <div key={index}>
+                  <div
+                    className={`h-2 rounded-full ${
+                      step.done
+                        ? "bg-emerald-500"
+                        : "bg-slate-200 dark:bg-slate-800"
+                    }`}
+                  />
+
+                  <p
+                    className={`mt-1 text-[9px] font-bold ${
+                      step.done
+                        ? "text-emerald-600 dark:text-emerald-400"
+                        : "text-slate-400"
+                    }`}
+                  >
+                    {step.done ? "✓ " : ""}
+                    {step.label}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </div>
+
+
+          <div className="grid gap-5 p-6 lg:grid-cols-2">
+
+            {/* STEP 1 */}
+            <div className="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Building2 className="h-5 w-5 text-orange-500" />
+
+                  <h3 className="text-sm font-black text-slate-900 dark:text-white">
+                    {isAr
+                      ? "1. بيانات النشاط والمساعد"
+                      : "1. Business & AI"}
+                  </h3>
+                </div>
+
+                {currentWorkspace.onboardingAiReady && (
+                  <CheckCircle2 className="h-5 w-5 text-emerald-500" />
+                )}
+              </div>
+
+              <div className="mt-4 space-y-3">
+                <div>
+                  <label className="text-[11px] font-bold text-slate-500">
+                    {isAr
+                      ? "اسم المساعد"
+                      : "AI Assistant Name"}
+                  </label>
+
+                  <input
+                    value={onboardingAgentName}
+                    onChange={(e) =>
+                      setOnboardingAgentName(
+                        e.target.value
+                      )
+                    }
+                    className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs outline-none focus:border-orange-400 dark:border-slate-700 dark:bg-slate-950"
+                    placeholder="FOX AI Assistant"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-[11px] font-bold text-slate-500">
+                    {isAr
+                      ? "مواعيد العمل"
+                      : "Working Hours"}
+                  </label>
+
+                  <input
+                    value={onboardingWorkingHours}
+                    onChange={(e) =>
+                      setOnboardingWorkingHours(
+                        e.target.value
+                      )
+                    }
+                    className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs outline-none focus:border-orange-400 dark:border-slate-700 dark:bg-slate-950"
+                    placeholder={
+                      isAr
+                        ? "مثال: السبت - الخميس، 10 صباحاً - 10 مساءً"
+                        : "Example: Sat-Thu, 10 AM - 10 PM"
+                    }
+                  />
+                </div>
+
+                <div>
+                  <label className="text-[11px] font-bold text-slate-500">
+                    {isAr
+                      ? "وصف النشاط"
+                      : "Business Description"}
+                  </label>
+
+                  <textarea
+                    rows={3}
+                    value={onboardingBusinessDescription}
+                    onChange={(e) =>
+                      setOnboardingBusinessDescription(
+                        e.target.value
+                      )
+                    }
+                    className="mt-1 w-full resize-none rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs outline-none focus:border-orange-400 dark:border-slate-700 dark:bg-slate-950"
+                    placeholder={
+                      isAr
+                        ? "اكتب باختصار النشاط والخدمات التي تقدمها..."
+                        : "Briefly describe your business and services..."
+                    }
+                  />
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleOnboardingSaveBusinessAI}
+                  className="w-full rounded-xl bg-slate-900 px-4 py-2.5 text-xs font-black text-white transition hover:bg-slate-800 dark:bg-white dark:text-slate-900"
+                >
+                  {currentWorkspace.onboardingAiReady
+                    ? isAr
+                      ? "✓ تحديث الإعداد"
+                      : "✓ Update Setup"
+                    : isAr
+                    ? "حفظ والمتابعة"
+                    : "Save & Continue"}
+                </button>
+              </div>
+            </div>
+
+
+            {/* STEP 2 */}
+            <div className="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <PackageRecommendation />
+
+                  <h3 className="text-sm font-black text-slate-900 dark:text-white">
+                    {isAr
+                      ? "2. جهّز بيانات نشاطك"
+                      : "2. Business Catalog"}
+                  </h3>
+                </div>
+
+                {currentWorkspace.onboardingCatalogReady && (
+                  <CheckCircle2 className="h-5 w-5 text-emerald-500" />
+                )}
+              </div>
+
+              <div className="mt-4 rounded-xl bg-slate-50 p-4 text-xs leading-6 text-slate-600 dark:bg-slate-800/60 dark:text-slate-300">
+                <p className="font-bold">
+                  {currentWorkspace.industry === "Clinic"
+                    ? isAr
+                      ? "أضف الخدمات، الأسعار والأطباء."
+                      : "Add services, prices and doctors."
+                    : currentWorkspace.industry === "Restaurant"
+                    ? isAr
+                      ? "أضف قائمة الطعام والأسعار."
+                      : "Add menu items and prices."
+                    : currentWorkspace.industry === "Pharmacy"
+                    ? isAr
+                      ? "أضف الأدوية والمنتجات."
+                      : "Add medicines and products."
+                    : currentWorkspace.industry === "Course Center"
+                    ? isAr
+                      ? "أضف الكورسات والأسعار."
+                      : "Add courses and prices."
+                    : isAr
+                    ? "أضف المنتجات أو الخدمات والأسعار."
+                    : "Add your products, services and prices."}
+                </p>
+
+                <p className="mt-1 text-[10px] text-slate-400">
+                  {isAr
+                    ? "FOX يعتمد على هذه البيانات للرد بدون اختراع أسعار أو خدمات."
+                    : "FOX uses this data to answer customers without inventing services or prices."}
+                </p>
+              </div>
+
+              <div className="mt-4 grid gap-2 sm:grid-cols-2">
+                <button
+                  type="button"
+                  onClick={() =>
+                    onNavigate(
+                      "client_industry_module"
+                    )
+                  }
+                  className="flex items-center justify-center gap-2 rounded-xl border border-orange-200 bg-orange-50 px-4 py-2.5 text-xs font-black text-orange-700 transition hover:bg-orange-100 dark:border-orange-500/20 dark:bg-orange-500/10 dark:text-orange-400"
+                >
+                  {isAr
+                    ? "فتح بيانات النشاط"
+                    : "Open Business Data"}
+
+                  <ChevronRight className="h-4 w-4" />
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleOnboardingCatalogReady}
+                  className="flex items-center justify-center gap-2 rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-black text-slate-600 transition hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                >
+                  <CheckCircle2 className="h-4 w-4" />
+
+                  {isAr
+                    ? "تم تجهيز البيانات"
+                    : "Catalog Ready"}
+                </button>
+              </div>
+            </div>
+
+
+            {/* STEP 3 */}
+            <div className="rounded-2xl border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Radio className="h-5 w-5 text-blue-500" />
+
+                  <h3 className="text-sm font-black text-slate-900 dark:text-white">
+                    {isAr
+                      ? "3. ربط Telegram"
+                      : "3. Connect Telegram"}
+                  </h3>
+                </div>
+
+                {currentWorkspace.telegramBotStatus === "connected" && (
+                  <CheckCircle2 className="h-5 w-5 text-emerald-500" />
+                )}
+              </div>
+
+              {currentWorkspace.telegramBotStatus === "connected" ? (
+                <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4 dark:border-emerald-500/20 dark:bg-emerald-500/10">
+                  <p className="text-xs font-black text-emerald-700 dark:text-emerald-400">
+                    ✓ Telegram Connected
+                  </p>
+
+                  <p className="mt-1 text-[10px] text-emerald-600/80">
+                    {currentWorkspace.telegramBotName || "FOX Telegram Bot"}
+                  </p>
+                </div>
+              ) : (
+                <div className="mt-4 space-y-3">
+                  <input
+                    type="password"
+                    value={onboardingTelegramToken}
+                    onChange={(e) =>
+                      setOnboardingTelegramToken(
+                        e.target.value
+                      )
+                    }
+                    className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 font-mono text-xs outline-none focus:border-blue-400 dark:border-slate-700 dark:bg-slate-950"
+                    placeholder="123456:ABC..."
+                  />
+
+                  <input
+                    value={onboardingTelegramBotName}
+                    onChange={(e) =>
+                      setOnboardingTelegramBotName(
+                        e.target.value
+                      )
+                    }
+                    className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs outline-none focus:border-blue-400 dark:border-slate-700 dark:bg-slate-950"
+                    placeholder="@my_business_bot"
+                  />
+
+                  <button
+                    type="button"
+                    disabled={onboardingTelegramSaving}
+                    onClick={handleOnboardingTelegramConnect}
+                    className="flex w-full items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 py-2.5 text-xs font-black text-white transition hover:bg-blue-700 disabled:opacity-50"
+                  >
+                    {onboardingTelegramSaving ? (
+                      <RefreshCw className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Send className="h-4 w-4" />
+                    )}
+
+                    {onboardingTelegramSaving
+                      ? isAr
+                        ? "جاري التحقق..."
+                        : "Verifying..."
+                      : isAr
+                      ? "ربط البوت"
+                      : "Connect Bot"}
+                  </button>
+                </div>
+              )}
+            </div>
+
+
+            {/* STEP 4 */}
+            <div className="rounded-2xl border border-orange-200 bg-gradient-to-br from-slate-950 to-slate-900 p-5 text-white dark:border-orange-500/20">
+              <div className="flex items-center gap-2">
+                <ShieldCheck className="h-5 w-5 text-orange-400" />
+
+                <h3 className="text-sm font-black">
+                  {isAr
+                    ? "4. جاهزية التشغيل"
+                    : "4. Go Live"}
+                </h3>
+              </div>
+
+              <div className="mt-4 space-y-2 text-xs">
+                {[
+                  {
+                    label:
+                      isAr
+                        ? "بيانات النشاط والمساعد"
+                        : "Business & AI",
+                    ready:
+                      Boolean(currentWorkspace.onboardingAiReady),
+                  },
+                  {
+                    label:
+                      isAr
+                        ? "الخدمات / المنتجات"
+                        : "Business Catalog",
+                    ready:
+                      Boolean(currentWorkspace.onboardingCatalogReady),
+                  },
+                  {
+                    label: "Telegram",
+                    ready:
+                      currentWorkspace.telegramBotStatus === "connected",
+                  },
+                ].map((item) => (
+                  <div
+                    key={item.label}
+                    className="flex items-center justify-between rounded-xl bg-white/5 px-3 py-2.5"
+                  >
+                    <span className="font-bold text-slate-300">
+                      {item.label}
+                    </span>
+
+                    {item.ready ? (
+                      <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+                    ) : (
+                      <XCircle className="h-4 w-4 text-slate-600" />
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              <button
+                type="button"
+                disabled={
+                  !currentWorkspace.onboardingAiReady ||
+                  !currentWorkspace.onboardingCatalogReady ||
+                  currentWorkspace.telegramBotStatus !== "connected"
+                }
+                onClick={handleOnboardingGoLive}
+                className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-orange-500 to-amber-500 px-4 py-3 text-xs font-black text-white shadow-lg shadow-orange-500/20 transition hover:from-orange-600 hover:to-amber-600 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <Zap className="h-4 w-4" />
+
+                {isAr
+                  ? "🚀 تشغيل FOX واستقبال العملاء"
+                  : "🚀 Launch FOX"}
+              </button>
+
+              <p className="mt-3 text-center text-[9px] text-slate-500">
+                {isAr
+                  ? "بعد التشغيل يمكنك تعديل أي إعداد من لوحة التحكم في أي وقت."
+                  : "You can change any configuration later from the dashboard."}
+              </p>
+            </div>
+
+          </div>
+        </div>
+      )}
+
       {/* Workspace Header Banner */}
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between rounded-3xl bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 p-6 sm:p-8 text-white shadow-xl border border-slate-800 relative overflow-hidden">
         <div className="absolute top-0 left-0 w-96 h-96 bg-orange-500/10 rounded-full blur-3xl pointer-events-none -translate-x-1/2 -translate-y-1/2" />

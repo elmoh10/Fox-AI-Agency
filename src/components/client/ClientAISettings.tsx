@@ -198,6 +198,11 @@ export const ClientAISettings: React.FC = () => {
       enableServiceRating,
       serviceRatingPrompt,
       languageMode: langPreference,
+
+      // FOX Launch readiness:
+      // workingHours existed in the UI but was not persisted here.
+      workingHours,
+
       fallbackMessage: fallbackMsg,
       supportAgentName,
       supportAgentPrompt,
