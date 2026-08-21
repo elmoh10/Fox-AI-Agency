@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useMemo } from "
 import { collection, onSnapshot, doc, setDoc, updateDoc, deleteDoc, query, where, getDoc } from "firebase/firestore";
 import { db, auth, sanitizeForFirestore } from "../services/firebase";
 import {
+  createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
   signOut as firebaseSignOut,
 } from "firebase/auth";
@@ -159,7 +160,15 @@ interface AppContextType {
   loginAs: (userId: string) => void;
   loginWithEmail: (email: string, password?: string) => Promise<boolean>;
   logout: () => void;
-  registerWorkspace: (workspaceName: string, industry: any, ownerName: string, email: string, phone: string, initialCode?: string) => Workspace;
+  registerWorkspace: (
+    workspaceName: string,
+    industry: any,
+    ownerName: string,
+    email: string,
+    phone: string,
+    initialCode?: string,
+    password?: string
+  ) => Promise<Workspace | null>;
   generateActivationCode: (
     planId: PlanId,
     durationDays?: number,
@@ -1205,118 +1214,502 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }, 150);
   };
 
-  const registerWorkspace = (
+  // =========================================================
+  // FOX PRODUCTION REGISTRATION V1
+  // =========================================================
+  //
+  // Firebase Authentication is the identity source of truth.
+  //
+  // Registration flow:
+  // 1. Validate input.
+  // 2. Create Firebase Auth user.
+  // 3. Create tenant workspace.
+  // 4. Create users/{uid} profile.
+  // 5. Bind user -> workspace.
+  // 6. Keep Firebase session active.
+  // =========================================================
+  const registerWorkspace = async (
     workspaceName: string,
     industry: any,
     ownerName: string,
     email: string,
     phone: string,
-    initialCode?: string
-  ): Workspace => {
-    const newWsId = `ws_${Math.random().toString(36).substring(2, 8)}`;
-    
-    // Check code if provided
-    let planId: PlanId = "starter";
-    if (initialCode) {
-      const codeObj = activationCodes.find((c) => c.code.trim().toUpperCase() === initialCode.trim().toUpperCase() && !c.isUsed);
-      if (codeObj) {
-        planId = codeObj.planId;
-        setActivationCodes((prev) =>
-          prev.map((c) =>
-            c.id === codeObj.id
-              ? { ...c, isUsed: true, usedByWorkspaceId: newWsId, usedByWorkspaceName: workspaceName }
-              : c
-          )
+    initialCode?: string,
+    password?: string
+  ): Promise<Workspace | null> => {
+    const cleanWorkspaceName =
+      workspaceName.trim();
+
+    const cleanOwnerName =
+      ownerName.trim();
+
+    const cleanEmail =
+      email.trim().toLowerCase();
+
+    const cleanPhone =
+      phone.trim();
+
+    const cleanPassword =
+      password || "";
+
+    if (
+      !cleanWorkspaceName ||
+      !cleanOwnerName ||
+      !cleanEmail
+    ) {
+      addToast(
+        language === "ar"
+          ? "يرجى استكمال بيانات التسجيل المطلوبة."
+          : "Please complete the required registration fields.",
+        "error"
+      );
+
+      return null;
+    }
+
+    if (
+      !cleanEmail.includes("@")
+    ) {
+      addToast(
+        language === "ar"
+          ? "يرجى إدخال بريد إلكتروني صحيح."
+          : "Please enter a valid email address.",
+        "error"
+      );
+
+      return null;
+    }
+
+    if (
+      cleanPassword.length < 8 ||
+      !/[A-Za-z]/.test(cleanPassword) ||
+      !/[0-9]/.test(cleanPassword)
+    ) {
+      addToast(
+        language === "ar"
+          ? "كلمة المرور يجب أن تكون 8 أحرف على الأقل وتحتوي على حروف وأرقام."
+          : "Password must be at least 8 characters and contain letters and numbers.",
+        "error"
+      );
+
+      return null;
+    }
+
+    const newWsId =
+      `ws_${Math.random()
+        .toString(36)
+        .substring(2, 8)}`;
+
+    let planId: PlanId =
+      "starter";
+
+    let codeObj:
+      | ActivationCode
+      | undefined;
+
+    if (initialCode?.trim()) {
+      codeObj =
+        activationCodes.find(
+          (c) =>
+            c.code
+              .trim()
+              .toUpperCase() ===
+              initialCode
+                .trim()
+                .toUpperCase() &&
+            !c.isUsed
+        );
+
+      if (!codeObj) {
+        addToast(
+          language === "ar"
+            ? "كود التفعيل غير صحيح أو تم استخدامه من قبل."
+            : "Activation code is invalid or already used.",
+          "error"
+        );
+
+        return null;
+      }
+
+      planId =
+        codeObj.planId;
+    }
+
+    // Trial anti-abuse check.
+    if (!initialCode?.trim()) {
+      const normalizedPhone =
+        cleanPhone.replace(
+          /[\s\-\+\(\)]/g,
+          ""
+        );
+
+      const hasUsedTrial =
+        workspaces.some((w) => {
+          const wPhone =
+            (w.phone || "").replace(
+              /[\s\-\+\(\)]/g,
+              ""
+            );
+
+          const wEmail =
+            (w.ownerEmail || "")
+              .trim()
+              .toLowerCase();
+
+          return (
+            (
+              normalizedPhone &&
+              wPhone === normalizedPhone
+            ) ||
+            wEmail === cleanEmail
+          );
+        });
+
+      if (hasUsedTrial) {
+        planId = "business";
+
+        addToast(
+          language === "ar"
+            ? "تم العثور على تسجيل سابق بنفس البريد أو الهاتف، لذلك لن يتم منح تجربة مجانية جديدة."
+            : "A previous registration was found for this email or phone, so another free trial will not be granted.",
+          "info"
         );
       }
     }
 
-        // Trial Anti-Fraud check for frontend registration
-    if (!initialCode) {
-      const cleanPhone = phone.replace(/[\s\-\+\(\)]/g, "");
-      const cleanEmail = email.trim().toLowerCase();
-      
-      const hasUsedTrial = workspaces.some(w => {
-        const wPhone = (w.phone || "").replace(/[\s\-\+\(\)]/g, "");
-        const wEmail = (w.ownerEmail || "").trim().toLowerCase();
-        return (wPhone === cleanPhone || wEmail === cleanEmail);
+    try {
+      // -----------------------------------------------------
+      // CREATE FIREBASE AUTH IDENTITY
+      // -----------------------------------------------------
+
+      const credential =
+        await createUserWithEmailAndPassword(
+          auth,
+          cleanEmail,
+          cleanPassword
+        );
+
+      const uid =
+        credential.user.uid;
+
+      const nowIso =
+        new Date().toISOString();
+
+      const expiry =
+        new Date(
+          Date.now() +
+            30 *
+              24 *
+              60 *
+              60 *
+              1000
+        )
+          .toISOString()
+          .split("T")[0];
+
+      const newWorkspace: Workspace = {
+        id: newWsId,
+        name: cleanWorkspaceName,
+        industry,
+        ownerName: cleanOwnerName,
+        ownerEmail: cleanEmail,
+        phone: cleanPhone,
+
+        ownerUid: uid,
+
+        status: "active",
+        planId,
+
+        subscriptionExpiresAt:
+          expiry,
+
+        aiConversationsUsed: 0,
+        totalCustomers: 0,
+        totalAppointments: 0,
+        totalComplaints: 0,
+
+        createdAt:
+          nowIso.split("T")[0],
+
+        registrationSource:
+          "web_portal",
+
+        onboardingStatus:
+          "in_progress",
+
+        onboardingCompleted:
+          false,
+
+        onboardingStep: 1,
+
+        businessDescription:
+          "",
+
+        onboardingAiReady:
+          false,
+
+        onboardingCatalogReady:
+          false,
+
+        aiSettings: {
+          agentName:
+            `${cleanWorkspaceName} AI Assistant`,
+
+          customPrompt:
+            `Assist customers for ${cleanWorkspaceName}. Be polite and helpful.`,
+
+          tone: "Friendly",
+
+          autoBookingEnabled:
+            true,
+
+          autoComplaintEscalation:
+            true,
+
+          languageMode:
+            "auto",
+        },
+      };
+
+      const newUser: User = {
+        id: uid,
+        name: cleanOwnerName,
+        email: cleanEmail,
+        role: "client_owner",
+        workspaceId: newWsId,
+        createdAt: nowIso,
+      };
+
+      // -----------------------------------------------------
+      // FIRESTORE
+      // -----------------------------------------------------
+
+      await setDoc(
+        doc(
+          db,
+          "workspaces",
+          newWsId
+        ),
+        sanitizeForFirestore(
+          newWorkspace
+        )
+      );
+
+      await setDoc(
+        doc(
+          db,
+          "users",
+          uid
+        ),
+        sanitizeForFirestore(
+          {
+            ...newUser,
+
+            uid,
+
+            workspaceId:
+              newWsId,
+
+            role:
+              "client_owner",
+
+            active:
+              true,
+
+            createdAt:
+              nowIso,
+          }
+        )
+      );
+
+      // -----------------------------------------------------
+      // MARK ACTIVATION CODE USED
+      // only after Auth + workspace creation succeeds
+      // -----------------------------------------------------
+
+      if (codeObj) {
+        const updatedCode = {
+          ...codeObj,
+
+          isUsed:
+            true,
+
+          usedByWorkspaceId:
+            newWsId,
+
+          usedByWorkspaceName:
+            cleanWorkspaceName,
+        };
+
+        setActivationCodes(
+          (prev) =>
+            prev.map((c) =>
+              c.id === codeObj!.id
+                ? updatedCode
+                : c
+            )
+        );
+
+        setDoc(
+          doc(
+            db,
+            "activationCodes",
+            codeObj.id
+          ),
+          sanitizeForFirestore(
+            updatedCode
+          ),
+          {
+            merge: true,
+          }
+        ).catch((error) =>
+          console.warn(
+            "[FOX REGISTRATION] Activation code sync notice:",
+            error
+          )
+        );
+      }
+
+      // -----------------------------------------------------
+      // LIVE APP SESSION
+      // -----------------------------------------------------
+
+      setWorkspaces(
+        (prev) => [
+          newWorkspace,
+          ...prev.filter(
+            (w) =>
+              w.id !==
+              newWorkspace.id
+          ),
+        ]
+      );
+
+      setAllUsers(
+        (prev) => [
+          newUser,
+          ...prev.filter(
+            (u) =>
+              u.id !== uid
+          ),
+        ]
+      );
+
+      setCurrentUser(
+        newUser
+      );
+
+      setCurrentWorkspaceIdState(
+        newWsId
+      );
+
+      localStorage.setItem(
+        "fox_user",
+        JSON.stringify(
+          newUser
+        )
+      );
+
+      localStorage.setItem(
+        "fox_current_workspace",
+        newWsId
+      );
+
+      // -----------------------------------------------------
+      // REGISTRATION CONFIRMATION
+      // -----------------------------------------------------
+
+      triggerRegistrationFeedback({
+        id:
+          `reg_${Date.now()}`,
+
+        workspaceId:
+          newWsId,
+
+        workspaceName:
+          cleanWorkspaceName,
+
+        ownerName:
+          cleanOwnerName,
+
+        ownerEmail:
+          cleanEmail,
+
+        phone:
+          cleanPhone ||
+          "+20 100 000 0000",
+
+        planId,
+
+        industry:
+          industry ||
+          "Clinic",
+
+        source:
+          "Web Portal",
       });
 
-      if (hasUsedTrial) {
-        planId = "business";
-        setTimeout(() => addToast("عفواً، لقد استفدت من الباقة التجريبية مسبقاً. تم تحويلك لباقة الأعمال.", "error"), 1000);
+      addToast(
+        language === "ar"
+          ? `تم إنشاء حساب ${cleanWorkspaceName} بنجاح. مرحباً بك في FOX AI AGENCY!`
+          : `${cleanWorkspaceName} account created successfully. Welcome to FOX AI AGENCY!`,
+        "success"
+      );
+
+      return newWorkspace;
+
+    } catch (error: any) {
+      console.error(
+        "[FOX REGISTRATION] Registration failed:",
+        error
+      );
+
+      const code =
+        String(
+          error?.code || ""
+        );
+
+      let message =
+        language === "ar"
+          ? "تعذر إنشاء الحساب. حاول مرة أخرى."
+          : "Unable to create the account. Please try again.";
+
+      if (
+        code.includes(
+          "email-already-in-use"
+        )
+      ) {
+        message =
+          language === "ar"
+            ? "هذا البريد الإلكتروني مسجل بالفعل. استخدم تسجيل الدخول."
+            : "This email is already registered. Please sign in.";
+      } else if (
+        code.includes(
+          "weak-password"
+        )
+      ) {
+        message =
+          language === "ar"
+            ? "كلمة المرور ضعيفة. استخدم كلمة مرور أقوى."
+            : "Password is too weak. Please choose a stronger password.";
+      } else if (
+        code.includes(
+          "invalid-email"
+        )
+      ) {
+        message =
+          language === "ar"
+            ? "البريد الإلكتروني غير صحيح."
+            : "Invalid email address.";
       }
+
+      addToast(
+        message,
+        "error"
+      );
+
+      return null;
     }
-
-    const newWorkspace: Workspace = {
-      id: newWsId,
-      name: workspaceName,
-      industry,
-      ownerName,
-      ownerEmail: email,
-      phone,
-      status: "active",
-      planId,
-      subscriptionExpiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split("T")[0],
-      aiConversationsUsed: 0,
-      totalCustomers: 0,
-      totalAppointments: 0,
-      totalComplaints: 0,
-      createdAt: new Date().toISOString().split("T")[0],
-
-      // FOX LAUNCH ONBOARDING V1
-      onboardingStatus: "in_progress",
-      onboardingCompleted: false,
-      onboardingStep: 1,
-      businessDescription: "",
-      onboardingAiReady: false,
-      onboardingCatalogReady: false,
-
-      aiSettings: {
-        agentName: `${workspaceName} AI Assistant`,
-        customPrompt: `Assist customers for ${workspaceName}. Be polite and helpful.`,
-        tone: "Friendly",
-        autoBookingEnabled: true,
-        autoComplaintEscalation: true,
-        languageMode: "auto",
-      },
-    };
-
-    setWorkspaces((prev) => [newWorkspace, ...prev]);
-
-    const newUser: User = {
-      id: `usr_${Math.random().toString(36).substring(2, 8)}`,
-      name: ownerName,
-      email,
-      role: "client_owner",
-      workspaceId: newWsId,
-      createdAt: new Date().toISOString().split("T")[0],
-    };
-
-    setAllUsers((prev) => [newUser, ...prev]);
-    setCurrentUser(newUser);
-    setCurrentWorkspaceIdState(newWsId);
-
-    // Save to persistent Firestore database
-    setDoc(doc(db, "workspaces", newWsId), newWorkspace).catch((err) =>
-      console.warn("Firestore workspace save notice:", err)
-    );
-
-    // Trigger Real-time Confirmation Toast / Modal
-    triggerRegistrationFeedback({
-      id: `reg_${Date.now()}`,
-      workspaceId: newWsId,
-      workspaceName: workspaceName,
-      ownerName: ownerName,
-      ownerEmail: email,
-      phone: phone || "+20 100 000 0000",
-      planId: planId,
-      industry: industry || "Clinic",
-      source: "Web Portal",
-    });
-
-    addToast(`تم تسجيل الحساب وإنشاء لوحة التحكم للنشاط "${workspaceName}" بنجاح!`, "success");
-    return newWorkspace;
   };
 
   const generateActivationCode = (

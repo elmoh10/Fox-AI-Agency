@@ -7,3 +7,10 @@ coverage/
 .env*
 !.env.example
 firebase-admin-key.json
+
+.env
+.env.local
+.env.production
+.env.development.local
+*.before-*
+firebase-debug.log

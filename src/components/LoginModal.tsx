@@ -40,6 +40,11 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
   const [phone, setPhone] = useState("");
   const [activationCode, setActivationCode] = useState("");
 
+  // FOX PRODUCTION REGISTRATION V1
+  const [registerPassword, setRegisterPassword] = useState("");
+  const [showRegisterPassword, setShowRegisterPassword] = useState(false);
+  const [registering, setRegistering] = useState(false);
+
   const isAr = language === "ar";
 
   if (!isOpen) return null;
@@ -59,11 +64,38 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
     }
   };
 
-  const handleRegister = (e: React.FormEvent) => {
+  const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!wsName || !ownerName || !email) return;
-    registerWorkspace(wsName, industry, ownerName, email, phone, activationCode);
-    onClose();
+
+    if (
+      !wsName ||
+      !ownerName ||
+      !email ||
+      !registerPassword
+    ) {
+      return;
+    }
+
+    setRegistering(true);
+
+    try {
+      const created =
+        await registerWorkspace(
+          wsName,
+          industry,
+          ownerName,
+          email,
+          phone,
+          activationCode,
+          registerPassword
+        );
+
+      if (created) {
+        onClose();
+      }
+    } finally {
+      setRegistering(false);
+    }
   };
 
   return (
@@ -316,6 +348,48 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
               </div>
             </div>
 
+            {/* FOX PRODUCTION REGISTRATION V1 */}
+            <div>
+              <label className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                {isAr ? "كلمة المرور" : "Password"}
+              </label>
+
+              <div className="mt-1 flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 dark:border-slate-800 dark:bg-slate-800">
+                <Lock className="h-4 w-4 text-slate-400" />
+
+                <input
+                  type={showRegisterPassword ? "text" : "password"}
+                  placeholder={
+                    isAr
+                      ? "8 أحرف على الأقل + حروف وأرقام"
+                      : "8+ characters with letters and numbers"
+                  }
+                  value={registerPassword}
+                  onChange={(e) => setRegisterPassword(e.target.value)}
+                  minLength={8}
+                  autoComplete="new-password"
+                  className="w-full text-xs font-semibold bg-transparent text-slate-900 dark:text-white focus:outline-none"
+                  required
+                />
+
+                <button
+                  type="button"
+                  onClick={() =>
+                    setShowRegisterPassword((v) => !v)
+                  }
+                  className="text-[10px] font-bold text-slate-500 hover:text-orange-500"
+                >
+                  {showRegisterPassword
+                    ? isAr
+                      ? "إخفاء"
+                      : "Hide"
+                    : isAr
+                    ? "إظهار"
+                    : "Show"}
+                </button>
+              </div>
+            </div>
+
             <div>
               <label className="text-xs font-bold text-slate-700 dark:text-slate-300">
                 {isAr ? "كود التفعيل (اختياري)" : "Activation Code (Optional)"}
@@ -334,9 +408,16 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onClose }) => {
 
             <button
               type="submit"
-              className="mt-2 w-full rounded-xl bg-orange-600 py-2.5 text-xs font-bold text-white shadow-md shadow-orange-600/20 hover:bg-orange-500 transition"
+              disabled={registering}
+              className="mt-2 w-full rounded-xl bg-orange-600 py-2.5 text-xs font-bold text-white shadow-md shadow-orange-600/20 hover:bg-orange-500 disabled:opacity-60 disabled:cursor-not-allowed transition"
             >
-              {isAr ? "تسجيل حساب المشترك وبدء الاستخدام" : "Create Account & Start"}
+              {registering
+                ? isAr
+                  ? "جاري إنشاء الحساب..."
+                  : "Creating account..."
+                : isAr
+                ? "تسجيل حساب المشترك وبدء الاستخدام"
+                : "Create Account & Start"}
             </button>
           </form>
         )}

@@ -85,7 +85,7 @@ export const DEMO_USERS: User[] = [
     id: "user_admin",
     name: "Hesham M. (Agency Owner)",
     email: "info.hesham.m@gmail.com",
-    password: "Etch2410#",
+    password: "",
     role: "super_admin",
     avatar: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80",
     createdAt: "2026-01-01",

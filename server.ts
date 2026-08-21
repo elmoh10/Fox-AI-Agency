@@ -18,7 +18,11 @@ import {
   encryptSecret,
   decryptSecret,
 } from "./src/services/secretService";
-import { randomBytes } from "crypto";
+import {
+  randomBytes,
+  scryptSync,
+  timingSafeEqual,
+} from "crypto";
 import express from "express";
 import path from "path";
 import dotenv from "dotenv";
@@ -35,6 +39,177 @@ import { db } from "./src/services/firebase";
 import { collection, getDocs } from "firebase/firestore";
 
 dotenv.config();
+
+// ============================================================
+// FOX PASSWORD HASHING V1
+// ============================================================
+//
+// Format:
+// scrypt$<salt>$<derived-key>
+//
+// - Plaintext passwords are never stored for new workspaces.
+// - timingSafeEqual prevents timing-based comparison leakage.
+// - Legacy plaintext workspaces are migrated after successful auth.
+// ============================================================
+
+function hashWorkspacePassword(
+  password: string
+): string {
+  if (!password) {
+    throw new Error(
+      "Password is required for hashing"
+    );
+  }
+
+  const salt =
+    randomBytes(16).toString("hex");
+
+  const derivedKey =
+    scryptSync(
+      password,
+      salt,
+      64
+    ).toString("hex");
+
+  return `scrypt$${salt}$${derivedKey}`;
+}
+
+function verifyWorkspacePassword(
+  password: string,
+  storedHash?: string
+): boolean {
+  if (
+    !password ||
+    !storedHash ||
+    !storedHash.startsWith("scrypt$")
+  ) {
+    return false;
+  }
+
+  try {
+    const [
+      algorithm,
+      salt,
+      storedKeyHex,
+    ] = storedHash.split("$");
+
+    if (
+      algorithm !== "scrypt" ||
+      !salt ||
+      !storedKeyHex
+    ) {
+      return false;
+    }
+
+    const storedKey =
+      Buffer.from(
+        storedKeyHex,
+        "hex"
+      );
+
+    const suppliedKey =
+      scryptSync(
+        password,
+        salt,
+        storedKey.length
+      );
+
+    if (
+      storedKey.length !==
+      suppliedKey.length
+    ) {
+      return false;
+    }
+
+    return timingSafeEqual(
+      storedKey,
+      suppliedKey
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function verifyAndMigrateWorkspacePassword(
+  workspace: any,
+  inputPassword: string
+): Promise<boolean> {
+  if (
+    !workspace ||
+    !inputPassword
+  ) {
+    return false;
+  }
+
+  // Modern secure account.
+  if (workspace.passwordHash) {
+    return verifyWorkspacePassword(
+      inputPassword,
+      workspace.passwordHash
+    );
+  }
+
+  // ==========================================================
+  // LEGACY ONE-TIME MIGRATION
+  // ==========================================================
+  //
+  // Existing workspaces may still contain password plaintext.
+  // Accept it ONLY when it exactly matches, then immediately:
+  // 1. create secure hash
+  // 2. remove plaintext from Firestore
+  // 3. remove plaintext from runtime object
+  // ==========================================================
+
+  if (
+    workspace.password &&
+    workspace.password ===
+      inputPassword
+  ) {
+    const passwordHash =
+      hashWorkspacePassword(
+        inputPassword
+      );
+
+    try {
+      await adminDb
+        .collection("workspaces")
+        .doc(workspace.id)
+        .set(
+          {
+            passwordHash,
+            password:
+              FieldValue.delete(),
+            passwordMigratedAt:
+              new Date().toISOString(),
+          },
+          {
+            merge: true,
+          }
+        );
+
+      workspace.passwordHash =
+        passwordHash;
+
+      delete workspace.password;
+
+      console.log(
+        `🔐 [FOX Auth] Legacy password migrated | Workspace=${workspace.id}`
+      );
+    } catch (error) {
+      console.error(
+        "❌ [FOX Auth] Password migration failed:",
+        error
+      );
+
+      // Do not authenticate if migration failed.
+      return false;
+    }
+
+    return true;
+  }
+
+  return false;
+}
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -96,7 +271,7 @@ app.post("/api/verify-otp", (req, res) => {
 
     if (!record) {
       // Fallback check for universal test code 123456
-      if (otpCode.trim() === "123456") {
+      if (false) {
         return res.json({ success: true, verified: true, message: "تم التحقق بواسطة كود الاختبار العام" });
       }
       return res.status(400).json({ error: "لم يتم العثور على رمز تفعيل لهذا البريد. أعد طلب الإرسال." });
@@ -107,7 +282,7 @@ app.post("/api/verify-otp", (req, res) => {
       return res.status(400).json({ error: "انتهت صلاحية رمز التفعيل (15 دقيقة). برجاء طلب رمز جديد." });
     }
 
-    if (record.code === otpCode.trim() || otpCode.trim() === "123456") {
+    if (record.code === otpCode.trim()) {
       delete otpStore[cleanEmail];
       return res.json({ success: true, verified: true, message: "تم تفعيل وتأكيد البريد الإلكتروني بنجاح!" });
     } else {
@@ -704,7 +879,7 @@ app.get(["/api/webhooks/meta-social", "/api/meta/webhook", "/api/webhooks/facebo
 
   console.log(`[Meta Webhook GET Verification] Full Query:`, query, `| Mode: ${mode}, Token: ${token}, Challenge: ${challenge}`);
 
-  const EXPECTED_TOKEN = "foxai_meta_webhook_secret";
+  const EXPECTED_TOKEN = process.env.META_WEBHOOK_VERIFY_TOKEN || "";
 
   if (challenge) {
     if (token && token !== EXPECTED_TOKEN) {
@@ -1444,7 +1619,7 @@ function finalizeTelegramRegistration(chatId: string, session: any, userInfo?: a
   }
 
   const userEmail = session.email || `${chatId}@telegram.agency`;
-  const userPassword = session.password || "123456";
+  const userPassword = session.password || "";
 
   const resolvedIndustryKey = session.industry || (
     (session.name || "").includes("عيادة") ? "Clinic" :
@@ -1462,7 +1637,11 @@ function finalizeTelegramRegistration(chatId: string, session: any, userInfo?: a
     industry: resolvedIndustryKey,
     ownerName: userInfo?.first_name ? `${userInfo.first_name} ${userInfo.last_name || ""}`.trim() : (session.name || "عميل تليجرام"),
     ownerEmail: userEmail,
-    password: userPassword,
+    // FOX PASSWORD HASHING V1
+    passwordHash:
+      hashWorkspacePassword(
+        userPassword
+      ),
     phone: session.phone || "+20 100 000 0000",
     status: "active",
     planId: planId,
@@ -1522,7 +1701,7 @@ function finalizeTelegramRegistration(chatId: string, session: any, userInfo?: a
   return {
     newWorkspace,
     newLead,
-    reply: `🎉 *تم تفعيل وتأكيد حسابك بنجاح في FOX AI AGENCY!* 🦊🤖\n\n🔑 *بيانات دخول لوحة تحكّم النشاط*:\n• *النشاط التجاري*: ${newWorkspace.name}\n• *نوع لوحة التحكم المخصصة*: ${indAr}\n• *البريد الإلكتروني*: \`${userEmail}\`\n• *كلمة السر*: \`${userPassword}\`\n• *حالة البريد*: ✅ تم التحقق والتفعيل (Verified)\n• *كود التفعيل*: \`${session.otpCode || "VERIFIED"}\`\n• *باقة الاشتراك*: ${planName}\n• *رقم التواصل*: ${newWorkspace.phone}\n• *كود النشاط (Workspace ID)*: \`${wsId}\`\n\n✅ *تم إنشاء لوحة التحكم المناسبة لنشاطك تلقائياً (عيادة / صيدلية / متجر / مركز كورسات / مطعم)!*\n\n🚀 **يمكنك الآن تسجيل الدخول وإدارة وكيلك الذكي عبر الرابط التالي**:\n🔗 https://fox-ai-agency.ai.studio/\n\nيمكنك كتابة /plans لمراجعة باقي الباقات أو /contact للتواصل المباشر مع الدعم.` + ratingPrompt
+    reply: `🎉 *تم تفعيل وتأكيد حسابك بنجاح في FOX AI AGENCY!* 🦊🤖\n\n🔑 *بيانات دخول لوحة تحكّم النشاط*:\n• *النشاط التجاري*: ${newWorkspace.name}\n• *نوع لوحة التحكم المخصصة*: ${indAr}\n• *البريد الإلكتروني*: \`${userEmail}\`\n• *كلمة السر*: 🔐 تم حفظها بأمان ولن يتم عرضها داخل المحادثة\n• *حالة البريد*: ✅ تم التحقق والتفعيل (Verified)\n• *كود التفعيل*: \`${session.otpCode || "VERIFIED"}\`\n• *باقة الاشتراك*: ${planName}\n• *رقم التواصل*: ${newWorkspace.phone}\n• *كود النشاط (Workspace ID)*: \`${wsId}\`\n\n✅ *تم إنشاء لوحة التحكم المناسبة لنشاطك تلقائياً (عيادة / صيدلية / متجر / مركز كورسات / مطعم)!*\n\n🚀 **يمكنك الآن تسجيل الدخول وإدارة وكيلك الذكي عبر الرابط التالي**:\n🔗 https://fox-ai-agency.ai.studio/\n\nيمكنك كتابة /plans لمراجعة باقي الباقات أو /contact للتواصل المباشر مع الدعم.` + ratingPrompt
   };
 }
 
@@ -1710,7 +1889,7 @@ async function processAgencyBotMessage(chatId: string, userInfo: any, userMsg: s
         session.step = "MOD_AWAITING_AUTH";
         telegramUserSessions[chatId] = session;
 
-        return `🔐 *التحقق من هوية صاحب المنشأة - FOX AI AGENCY* 🏢🤖\n\nالبوت على علم بجميع المنشئات والمشتركين لدى الوكالة. للحفاظ على أمان بياناتك والتأكد من هويتك كمالك للمنشأة:\n\nبرجاء كتابة **البريد الإلكتروني وكلمة السر** الخاصين بحساب منشأتك (مثال: \`ahmed@company.com 123456\`):`;
+        return `🔐 *التحقق من هوية صاحب المنشأة - FOX AI AGENCY* 🏢🤖\n\nالبوت على علم بجميع المنشئات والمشتركين لدى الوكالة. للحفاظ على أمان بياناتك والتأكد من هويتك كمالك للمنشأة:\n\nبرجاء كتابة **البريد الإلكتروني وكلمة السر** الخاصين بحساب منشأتك (مثال: \`ahmed@company.com YourStrongPassword\`):`;
       }
     }
 
@@ -1721,7 +1900,7 @@ async function processAgencyBotMessage(chatId: string, userInfo: any, userMsg: s
       let inputPassword = emailMatch ? trimmed.replace(emailMatch[0], "").trim() : trimmed;
 
       if (!inputEmail) {
-        return `⚠️ *برجاء كتابة البريد الإلكتروني وكلمة السر بشكل صحيح* كالتالي:\n\`example@domain.com 123456\``;
+        return `⚠️ *برجاء كتابة البريد الإلكتروني وكلمة السر بشكل صحيح* كالتالي:\n\`example@domain.com YourStrongPassword\``;
       }
 
       const foundWs = registeredWorkspacesStore.find((w) => {
@@ -1733,7 +1912,13 @@ async function processAgencyBotMessage(chatId: string, userInfo: any, userMsg: s
         return `❌ *عفواً، لم نجد منشأة مسجلة بهذا البريد الإلكتروني (\`${inputEmail}\`)!* 🚫\n\n• برجاء التأكد من البريد الإلكتروني الذي سجلت به في الوكالة.\n• للبدء بتسجيل منشأة جديدة، أرسل كلمة **تسجيل** أو **/start**.`;
       }
 
-      if (foundWs.password && foundWs.password !== inputPassword && inputPassword !== "123456") {
+      const passwordValid =
+        await verifyAndMigrateWorkspacePassword(
+          foundWs,
+          inputPassword
+        );
+
+      if (!passwordValid) {
         return `❌ *كلمة السر غير صحيحة!* 🔑\n\nالبريد الإلكتروني \`${inputEmail}\` مخصص لمنشأة **${foundWs.name}**، ولكن كلمة السر المدخلة غير صحيحة.\nبرجاء كتابة كلمة السر الصحيحة للدخول والتعديل.`;
       }
 
@@ -1871,7 +2056,7 @@ async function processAgencyBotMessage(chatId: string, userInfo: any, userMsg: s
     session.step = "AWAITING_CREDENTIALS";
     telegramUserSessions[chatId] = session;
 
-    return `تم استلام بيانات النشاط: *${session.name}* (${parsedInd.labelAr} - رقم: ${session.phone}) 📝\n\n📌 *الخطوة 4 من 5 (بيانات الدخول للوحة التحكم)*:\nبرجاء إرسال **البريد الإلكتروني وكلمة السر** اللذين تفضلهما لإدارة لوحة تحكّم نشاطك (مثال: \`ahmed@gmail.com 123456\`):`;
+    return `تم استلام بيانات النشاط: *${session.name}* (${parsedInd.labelAr} - رقم: ${session.phone}) 📝\n\n📌 *الخطوة 4 من 5 (بيانات الدخول للوحة التحكم)*:\nبرجاء إرسال **البريد الإلكتروني وكلمة السر** اللذين تفضلهما لإدارة لوحة تحكّم نشاطك (مثال: \`ahmed@gmail.com YourStrongPassword\`):`;
   }
 
   // STEP-BY-STEP REGISTRATION FLOW
@@ -1910,13 +2095,13 @@ async function processAgencyBotMessage(chatId: string, userInfo: any, userMsg: s
       session.step = "AWAITING_CREDENTIALS";
       telegramUserSessions[chatId] = session;
 
-      return `⚠️ *عفواً، رقم الهاتف (${session.phone}) قد استفاد بالفعل من الباقة التجريبية المجانية سابقاً!* 🚫\n\nتُتاح الباقة التجريبية **مرة واحدة فقط لكل هاتف**.\nتم تحويل طلبك تلقائياً لباقة **Fox Business** (1000 جنيه / شهرياً).\n\n📌 *الخطوة 4 من 5 (بيانات الدخول للوحة التحكم)*:\nبرجاء كتابة **البريد الإلكتروني وكلمة السر** لدخول لوحتك (مثال: \`ahmed@gmail.com 123456\`):`;
+      return `⚠️ *عفواً، رقم الهاتف (${session.phone}) قد استفاد بالفعل من الباقة التجريبية المجانية سابقاً!* 🚫\n\nتُتاح الباقة التجريبية **مرة واحدة فقط لكل هاتف**.\nتم تحويل طلبك تلقائياً لباقة **Fox Business** (1000 جنيه / شهرياً).\n\n📌 *الخطوة 4 من 5 (بيانات الدخول للوحة التحكم)*:\nبرجاء كتابة **البريد الإلكتروني وكلمة السر** لدخول لوحتك (مثال: \`ahmed@gmail.com YourStrongPassword\`):`;
     }
 
     session.step = "AWAITING_CREDENTIALS";
     telegramUserSessions[chatId] = session;
 
-    return `تم تسجيل رقم الهاتف: ${session.phone} 📱\n\n📌 *الخطوة 4 من 5 (بيانات الدخول للوحة التحكم)*:\nبرجاء إرسال **البريد الإلكتروني وكلمة السر** للتحكّم ببياناتك ولوحتك (مثال: \`ahmed@gmail.com 123456\` أو أرسل البريد الإلكتروني أولاً):`;
+    return `تم تسجيل رقم الهاتف: ${session.phone} 📱\n\n📌 *الخطوة 4 من 5 (بيانات الدخول للوحة التحكم)*:\nبرجاء إرسال **البريد الإلكتروني وكلمة السر** للتحكّم ببياناتك ولوحتك (مثال: \`ahmed@gmail.com YourStrongPassword\` أو أرسل البريد الإلكتروني أولاً):`;
   }
 
   // STEP 3: AWAITING_CREDENTIALS
@@ -1933,7 +2118,26 @@ async function processAgencyBotMessage(chatId: string, userInfo: any, userMsg: s
       session.password = trimmed;
     } else {
       // User sent text without a valid email format
-      return `⚠️ *برجاء إدخال بريد إلكتروني صحيح* لإرسال كود التفعيل عليه والتحكم باللوحة (مثال: \`myname@company.com 123456\`):`;
+      return `⚠️ *برجاء إدخال بريد إلكتروني صحيح* لإرسال كود التفعيل عليه والتحكم باللوحة (مثال: \`myname@company.com YourStrongPassword\`):`;
+    }
+
+    // FOX PASSWORD POLICY V1
+    if (
+      session.password &&
+      (
+        session.password.length < 8 ||
+        !/[A-Za-z]/.test(session.password) ||
+        !/[0-9]/.test(session.password)
+      )
+    ) {
+      session.password = undefined;
+
+      return `⚠️ *كلمة السر ضعيفة.*
+
+استخدم كلمة سر لا تقل عن 8 أحرف وتحتوي على حروف وأرقام.
+
+مثال:
+\`MyBusiness2026\``;
     }
 
     if (!session.password) {
@@ -1989,7 +2193,7 @@ async function processAgencyBotMessage(chatId: string, userInfo: any, userMsg: s
       return `🔄 *تم إعادة إرسال كود تفعيل جديد عبر البريد الإلكتروني!*\n\n📧 البريد الإلكتروني: \`${session.email}\`\n🔐 **كود التفعيل الجديد**: \`${newOtp}\`\n\nبرجاء كتابة الكود الجديد للتحقق والتفعيل:`;
     }
 
-    if (trimmed === session.otpCode || trimmed === "123456") {
+    if (trimmed === session.otpCode) {
       session.isVerified = true;
       const result = finalizeTelegramRegistration(chatId, session, userInfo);
       return result.reply;
@@ -2013,7 +2217,7 @@ async function processAgencyBotMessage(chatId: string, userInfo: any, userMsg: s
     session.step = "AWAITING_CREDENTIALS";
     telegramUserSessions[chatId] = session;
 
-    return `ممتاز! تم اختيار باقة **${session.selectedPlan === "enterprise" ? "Fox Enterprise" : session.selectedPlan === "starter" ? "Fox Starter" : "Fox Business"}** 💼\n\n📌 *الخطوة 3 من 4 (بيانات الدخول للوحة التحكم)*:\nبرجاء إرسال **البريد الإلكتروني وكلمة السر** (مثال: \`ahmed@gmail.com 123456\`):`;
+    return `ممتاز! تم اختيار باقة **${session.selectedPlan === "enterprise" ? "Fox Enterprise" : session.selectedPlan === "starter" ? "Fox Starter" : "Fox Business"}** 💼\n\n📌 *الخطوة 3 من 4 (بيانات الدخول للوحة التحكم)*:\nبرجاء إرسال **البريد الإلكتروني وكلمة السر** (مثال: \`ahmed@gmail.com YourStrongPassword\`):`;
   }
 
   // Trigger Registration Flow Start on Registration Keywords or Plan Selection
@@ -2314,7 +2518,13 @@ app.post("/api/telegram/client-data-request", async (req, res) => {
     });
   }
 
-  if (ws.password && password && ws.password !== password && password !== "123456") {
+  const passwordValid =
+    await verifyAndMigrateWorkspacePassword(
+      ws,
+      String(password || "")
+    );
+
+  if (!passwordValid) {
     return res.status(401).json({
       error: "كلمة السر غير صحيحة الخاصة بحساب هذه المنشأة.",
     });

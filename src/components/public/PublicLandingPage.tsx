@@ -79,16 +79,44 @@ export const PublicLandingPage: React.FC<PublicLandingPageProps> = ({ onLoginCli
   const [phone, setPhone] = useState("");
   const [activationCode, setActivationCode] = useState("");
 
+  // FOX PRODUCTION REGISTRATION V1
+  const [regPassword, setRegPassword] = useState("");
+  const [showRegPassword, setShowRegPassword] = useState(false);
+  const [registering, setRegistering] = useState(false);
+
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!loginEmail || !loginPassword) return;
     await loginWithEmail(loginEmail, loginPassword);
   };
 
-  const handleRegisterSubmit = (e: React.FormEvent) => {
+  const handleRegisterSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!wsName || !ownerName || !regEmail) return;
-    registerWorkspace(wsName, industry, ownerName, regEmail, phone, activationCode);
+
+    if (
+      !wsName ||
+      !ownerName ||
+      !regEmail ||
+      !regPassword
+    ) {
+      return;
+    }
+
+    setRegistering(true);
+
+    try {
+      await registerWorkspace(
+        wsName,
+        industry,
+        ownerName,
+        regEmail,
+        phone,
+        activationCode,
+        regPassword
+      );
+    } finally {
+      setRegistering(false);
+    }
   };
 
   const scrollToRegistration = (planId?: PlanId) => {
@@ -376,6 +404,46 @@ export const PublicLandingPage: React.FC<PublicLandingPageProps> = ({ onLoginCli
                     </div>
                   </div>
 
+                  {/* FOX PRODUCTION REGISTRATION V1 */}
+                  <div>
+                    <label className="text-xs font-bold text-slate-300 block mb-1">
+                      {isAr ? "كلمة المرور" : "Password"}
+                    </label>
+
+                    <div className="flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-800/80 px-3.5 py-2.5 focus-within:border-orange-500">
+                      <Lock className="h-4 w-4 text-slate-400 shrink-0" />
+
+                      <input
+                        type={showRegPassword ? "text" : "password"}
+                        placeholder={
+                          isAr
+                            ? "8 أحرف على الأقل + حروف وأرقام"
+                            : "8+ characters with letters and numbers"
+                        }
+                        value={regPassword}
+                        onChange={(e) => setRegPassword(e.target.value)}
+                        minLength={8}
+                        autoComplete="new-password"
+                        className="w-full text-xs font-semibold bg-transparent text-white focus:outline-none placeholder-slate-500"
+                        required
+                      />
+
+                      <button
+                        type="button"
+                        onClick={() => setShowRegPassword((v) => !v)}
+                        className="text-[10px] font-bold text-slate-400 hover:text-orange-400"
+                      >
+                        {showRegPassword
+                          ? isAr
+                            ? "إخفاء"
+                            : "Hide"
+                          : isAr
+                          ? "إظهار"
+                          : "Show"}
+                      </button>
+                    </div>
+                  </div>
+
                   <div>
                     <label className="text-xs font-bold text-slate-300 block mb-1">
                       {isAr ? "كود التفعيل (اختياري)" : "Activation Code (Optional)"}
@@ -394,9 +462,18 @@ export const PublicLandingPage: React.FC<PublicLandingPageProps> = ({ onLoginCli
 
                   <button
                     type="submit"
-                    className="w-full py-3.5 rounded-2xl bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700 text-white font-black text-xs shadow-lg shadow-orange-500/20 transition flex items-center justify-center gap-2"
+                    disabled={registering}
+                    className="w-full py-3.5 rounded-2xl bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700 disabled:opacity-60 disabled:cursor-not-allowed text-white font-black text-xs shadow-lg shadow-orange-500/20 transition flex items-center justify-center gap-2"
                   >
-                    <span>{isAr ? "تأكيد التسجيل وبدء الاستخدام" : "Register Business & Get Started"}</span>
+                    <span>
+                      {registering
+                        ? isAr
+                          ? "جاري إنشاء الحساب..."
+                          : "Creating account..."
+                        : isAr
+                        ? "تأكيد التسجيل وبدء الاستخدام"
+                        : "Register Business & Get Started"}
+                    </span>
                     <ArrowRight className={`h-4 w-4 ${isAr ? "rotate-180" : ""}`} />
                   </button>
 
