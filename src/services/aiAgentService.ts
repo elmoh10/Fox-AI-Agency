@@ -152,6 +152,64 @@ function extractCanonicalExternalCustomerId(
 export class AiAgentService {
 
   // =========================================================
+  // =========================================================
+  // FOX FREE AI ROUTER
+  // =========================================================
+
+  private getOpenRouterPrimaryModel(): string {
+    return (
+      process.env.OPENROUTER_MODEL?.trim() ||
+      "openrouter/free"
+    );
+  }
+
+  /**
+   * OpenRouter's free router dynamically selects from
+   * currently available free models and filters models
+   * according to request capabilities such as tool calling.
+   *
+   * Keeping openrouter/free as the final OpenRouter route
+   * avoids maintaining stale hard-coded free model IDs.
+   */
+  private getOpenRouterFallbackModels(
+    primaryModel?: string
+  ): string[] {
+    const primary =
+      String(primaryModel || "").trim();
+
+    const models = [
+      "openrouter/free",
+    ];
+
+    return models.filter(
+      (model, index, all) =>
+        model &&
+        model !== primary &&
+        all.indexOf(model) === index
+    );
+  }
+
+  private getOpenRouterExtraBody(
+    primaryModel?: string
+  ): Record<string, any> {
+    const models =
+      this.getOpenRouterFallbackModels(
+        primaryModel
+      );
+
+    const extraBody: Record<string, any> = {
+      provider: {
+        allow_fallbacks: true,
+      },
+    };
+
+    if (models.length > 0) {
+      extraBody.models = models;
+    }
+
+    return extraBody;
+  }
+
   // OPENROUTER CLIENT
   // Primary AI provider for FOX AI AGENCY
   // Uses OpenAI-compatible API.
@@ -314,8 +372,11 @@ ${message}
 
     if (openRouter) {
       try {
+        const routerModel =
+          this.getOpenRouterPrimaryModel();
+
         const result = await openRouter.chat.completions.create({
-          model: process.env.OPENROUTER_MODEL || "openrouter/free",
+          model: routerModel,
           messages: [
             {
               role: "system",
@@ -327,7 +388,14 @@ ${message}
               content: routerPrompt
             }
           ],
-          temperature: 0
+          temperature: 0,
+
+          // OpenRouter-specific routing options.
+          // The OpenAI SDK forwards these in the request body.
+          extra_body:
+            this.getOpenRouterExtraBody(
+              routerModel
+            ),
         });
 
         const routed =
@@ -850,7 +918,17 @@ ${industryContext || "Standard business inquiry catalog."}
   private async generateChatResponseInternal(params: GenerateChatParams): Promise<ChatResponse> {
     const { workspace } = params;
 
-    const { message, channel = "telegram", chatHistory = [], overrideConfig } = params;
+    const {
+      channel = "telegram",
+      chatHistory = [],
+      overrideConfig
+    } = params;
+
+    // Mutable local copy.
+    // Booking retry may temporarily replace the current message
+    // with the preserved customer identity so the existing
+    // deterministic booking flow can be reused safely.
+    let message = params.message;
     
 
     let messageLang = this.detectLanguage(message);
@@ -2086,6 +2164,190 @@ ${industryContext || "Standard business inquiry catalog."}
     }
 
     // =========================================================
+    // FOX BOOKING RETRY DATE/TIME STATE
+    //
+    // Customer identity was already collected, but the requested
+    // appointment was unavailable. The next message must therefore
+    // be treated as a replacement date/time — never as a name.
+    // =========================================================
+    if (workspace?.id && params.sessionId) {
+      try {
+        const retryCtx =
+          await sharedMemoryService.getContext(
+            workspace.id,
+            params.sessionId
+          );
+
+        const lastRetryBot =
+          retryCtx.messages
+            .slice()
+            .reverse()
+            .find((m) => m.sender === "bot")
+            ?.text || "";
+
+        const waitingForNewDatetime =
+          lastRetryBot.includes(
+            "BOOKING_STATE:WAIT_NEW_DATETIME"
+          );
+
+        if (waitingForNewDatetime) {
+          const retryMessage =
+            String(message || "").trim();
+
+          const retryExplicitDate =
+            /(\d{1,2})\s+(يناير|فبراير|مارس|أبريل|ابريل|مايو|يونيو|يوليو|أغسطس|اغسطس|سبتمبر|أكتوبر|اكتوبر|نوفمبر|ديسمبر)|(\d{4}-\d{2}-\d{2})|بكره|بكرة|غدا|غداً/i.test(
+              retryMessage
+            );
+
+          const retryExplicitTime =
+            /الساعة\s*\d{1,2}|(\d{1,2}):(\d{2})\s*(AM|PM)|\d{1,2}\s*(صباح|ظهر|مساء)/i.test(
+              retryMessage
+            );
+
+          if (
+            !retryExplicitDate ||
+            !retryExplicitTime
+          ) {
+            const retryPrompt =
+              messageLang === "ar"
+                ? "ابعتلي التاريخ والوقت الجديد مع بعض، مثلاً: 26 أغسطس الساعة 3 مساءً."
+                : "Please send the new appointment date and time together.";
+
+            // Keep state alive.
+            await sharedMemoryService.appendMessage(
+              workspace.id,
+              params.sessionId,
+              {
+                sender: "bot",
+                text:
+                  retryPrompt +
+                  "\n" +
+                  lastRetryBot
+                    .split("\n")
+                    .filter(
+                      (line) =>
+                        line.startsWith("BOOKING_STATE:") ||
+                        line.startsWith("BOOKING_CUSTOMER_NAME:") ||
+                        line.startsWith("BOOKING_CUSTOMER_PHONE:")
+                    )
+                    .join("\n"),
+                time: new Date().toISOString(),
+                agentRole: "Sales"
+              }
+            );
+
+            return {
+              response: retryPrompt,
+              aiResponse: retryPrompt,
+              detectedLanguage: messageLang,
+              source: "fox_booking_retry_datetime_guard",
+              suggestedActions: []
+            };
+          }
+
+          const customerName =
+            lastRetryBot.match(
+              /BOOKING_CUSTOMER_NAME:(.+)/
+            )?.[1]?.trim() || "";
+
+          const customerPhone =
+            lastRetryBot.match(
+              /BOOKING_CUSTOMER_PHONE:(\d+)/
+            )?.[1]?.trim() || "";
+
+          if (
+            !customerName ||
+            customerPhone.length < 10
+          ) {
+            console.warn(
+              `⚠️ [FOX Booking Retry] Preserved identity missing | Workspace=${workspace.id}`
+            );
+
+            const resetPrompt =
+              messageLang === "ar"
+                ? "محتاج أتأكد من بيانات الحجز. ابعتلي اسم صاحب الحجز ورقم الموبايل مرة تانية."
+                : "I need to reconfirm the booking details. Please send the customer name and phone number again.";
+
+            await sharedMemoryService.appendMessage(
+              workspace.id,
+              params.sessionId,
+              {
+                sender: "bot",
+                text: resetPrompt,
+                time: new Date().toISOString(),
+                agentRole: "Sales"
+              }
+            );
+
+            return {
+              response: resetPrompt,
+              aiResponse: resetPrompt,
+              detectedLanguage: messageLang,
+              source: "fox_booking_retry_identity_reset",
+              suggestedActions: []
+            };
+          }
+
+          // Store a NEW complete booking request.
+          //
+          // The existing deterministic parser searches backwards
+          // for the most recent booking-intent user message, so this
+          // becomes the new canonical date/time request.
+          const replacementBookingRequest =
+            `عاوز أحجز موعد ${retryMessage}`;
+
+          await sharedMemoryService.appendMessage(
+            workspace.id,
+            params.sessionId,
+            {
+              sender: "user",
+              text: replacementBookingRequest,
+              time: new Date().toISOString(),
+              agentRole: "Sales"
+            }
+          );
+
+          // Re-create the identity prompt internally so the existing
+          // deterministic booking follow-up can safely reuse the
+          // already collected identity in this SAME request.
+          const identityPrompt =
+            messageLang === "ar"
+              ? "تمام ✅ قبل تأكيد الحجز، ابعتلي **اسم صاحب الحجز ورقم الموبايل** المستخدم في الحجز."
+              : "Great ✅ Before confirming the booking, please send the customer name and phone number.";
+
+          await sharedMemoryService.appendMessage(
+            workspace.id,
+            params.sessionId,
+            {
+              sender: "bot",
+              text: identityPrompt,
+              time: new Date().toISOString(),
+              agentRole: "Sales"
+            }
+          );
+
+          console.log(
+            `🔁 [FOX Booking Retry] New date/time captured | Workspace=${workspace.id} | Customer=${customerName} | Phone=${customerPhone}`
+          );
+
+          // Replace the current message in-memory for the existing
+          // deterministic identity follow-up below.
+          message =
+            `الاسم ${customerName} ورقم الموبايل ${customerPhone}`;
+
+          console.log(
+            `🪪 [FOX Booking Retry] Reusing preserved customer identity | Workspace=${workspace.id}`
+          );
+        }
+      } catch (retryError) {
+        console.warn(
+          "[FOX Booking Retry] State handling failed:",
+          retryError
+        );
+      }
+    }
+
+    // =========================================================
     // DETERMINISTIC BOOKING FOLLOW-UP
     // If FOX previously asked for fresh name + phone, complete
     // the booking server-side instead of depending on LLM tools.
@@ -2286,8 +2548,32 @@ ${industryContext || "Standard business inquiry catalog."}
             if (!available) {
               const msg =
                 messageLang === "ar"
-                  ? `الموعد ${bookingDate} الساعة ${bookingTime} غير متاح حالياً. اختار وقت تاني من فضلك.`
-                  : `The appointment on ${bookingDate} at ${bookingTime} is not available. Please choose another time.`;
+                  ? `الموعد ${bookingDate} الساعة ${bookingTime} غير متاح حالياً. اختار تاريخ ووقت تاني من فضلك.`
+                  : `The appointment on ${bookingDate} at ${bookingTime} is not available. Please choose another date and time.`;
+
+              // Preserve the already validated fresh identity so the
+              // customer does NOT need to send name + phone again.
+              //
+              // This marker is internal shared-memory state and is
+              // intentionally not returned to the customer.
+              await sharedMemoryService.appendMessage(
+                workspace.id,
+                params.sessionId,
+                {
+                  sender: "bot",
+                  text:
+                    msg +
+                    `\nBOOKING_STATE:WAIT_NEW_DATETIME` +
+                    `\nBOOKING_CUSTOMER_NAME:${customerName}` +
+                    `\nBOOKING_CUSTOMER_PHONE:${phone}`,
+                  time: new Date().toISOString(),
+                  agentRole: "Sales"
+                }
+              );
+
+              console.log(
+                `🔄 [FOX Booking] Appointment unavailable; waiting for replacement date/time | Workspace=${workspace.id} | Customer=${customerName}`
+              );
 
               return {
                 response: msg,
@@ -3433,16 +3719,94 @@ DATE SAFETY RULES:
           let orCompletion: any = null;
           let finalOpenRouterText = "";
 
-          // Allow several tool turns:
-          // availability -> collect info -> booking -> final confirmation.
-          for (let toolRound = 0; toolRound < 5; toolRound++) {
-            orCompletion = await openRouter.chat.completions.create({
-              model: process.env.OPENROUTER_MODEL || "openrouter/free",
+          const foxOpenRouterModel =
+            this.getOpenRouterPrimaryModel();
+
+          // =====================================================
+          // FOX SMART TOOL ROUTER
+          // =====================================================
+          //
+          // Do NOT send function tools for ordinary questions.
+          // This lets OpenRouter use a much wider free-model pool
+          // and avoids unnecessary tool loops.
+          //
+          // Enable tools only when the current message indicates
+          // an operational action that may require real workspace
+          // data or a write operation.
+          // =====================================================
+
+          const normalizedCurrentMessage =
+            String(message || "")
+              .trim()
+              .toLowerCase();
+
+          // -----------------------------------------------------
+          // FOX OPERATIONAL INTENT DETECTION
+          //
+          // Important:
+          // Generic words such as "متاح", "متاحة", "available"
+          // are NOT enough to enable tools.
+          //
+          // Example:
+          // "ايه الخدمات المتاحة؟" => Tools OFF
+          // "فيه ميعاد متاح؟"     => Tools ON
+          // -----------------------------------------------------
+
+          const bookingOperationalIntent =
+            /(?:حجز|احجز|أحجز|موعد|ميعاد|مواعيدي|حجوزاتي|appointment|appointments|book\b|booking|reserve|reservation|my appointments)/i.test(
+              normalizedCurrentMessage
+            );
+
+          const orderOperationalIntent =
+            /(?:اطلب|عاوز أطلب|عايز أطلب|اوردر|أوردر|order\b|place an order|purchase|اشتري|شراء)/i.test(
+              normalizedCurrentMessage
+            );
+
+          const operationalIntent =
+            bookingOperationalIntent ||
+            orderOperationalIntent;
+
+          const toolsEnabled =
+            operationalIntent ||
+            forcedBookingSales;
+
+          console.log(
+            `🧠 [FOX Free Router] Primary=${foxOpenRouterModel} | Fallback=openrouter/free | Tools=${toolsEnabled ? "ON" : "OFF"}`
+          );
+
+          // Tool requests may require several turns.
+          // Normal chat only needs one model request.
+          const maxOpenRouterRounds =
+            toolsEnabled ? 5 : 1;
+
+          for (
+            let toolRound = 0;
+            toolRound < maxOpenRouterRounds;
+            toolRound++
+          ) {
+            const requestBody: any = {
+              model: foxOpenRouterModel,
               messages: openRouterMessages,
-              tools: openRouterTools,
-              tool_choice: "auto",
-              temperature: 0.3
-            });
+              temperature: 0.3,
+
+              extra_body:
+                this.getOpenRouterExtraBody(
+                  foxOpenRouterModel
+                ),
+            };
+
+            if (toolsEnabled) {
+              requestBody.tools =
+                openRouterTools;
+
+              requestBody.tool_choice =
+                "auto";
+            }
+
+            orCompletion =
+              await openRouter.chat.completions.create(
+                requestBody
+              );
 
             const orMessage: any =
               orCompletion.choices?.[0]?.message;
@@ -4104,7 +4468,7 @@ DATE SAFETY RULES:
           }
 
           console.log(
-            `✅ [OpenRouter] Response completed | Model=${orCompletion?.model || "openrouter/free"}`
+            `✅ [FOX Free Router] Response completed | Requested=${foxOpenRouterModel} | Served=${orCompletion?.model || "unknown"}`
           );
 
           // Save bot reply in this tenant's shared memory.
@@ -4129,7 +4493,7 @@ DATE SAFETY RULES:
             aiResponse: finalOpenRouterText,
             detectedLanguage: messageLang,
             source:
-              `openrouter:${orCompletion?.model || process.env.OPENROUTER_MODEL || "openrouter/free"}`,
+              `openrouter:${orCompletion?.model || foxOpenRouterModel}`,
             suggestedActions:
               messageLang === "ar"
                 ? [
