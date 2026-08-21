@@ -217,16 +217,37 @@ class AiModelAnalyticsService {
                 "normal"
               ).toLowerCase();
 
+            const cooldownUntil =
+              model.cooldownUntil
+                ? new Date(
+                    model.cooldownUntil
+                  ).getTime()
+                : 0;
+
+            const cooldownActive =
+              cooldownUntil >
+              Date.now();
+
             if (requests < 3) {
               return false;
             }
 
+            // Real cooldown enforcement:
+            // model is temporarily removed from adaptive
+            // selection until cooldownUntil expires.
+            if (cooldownActive) {
+              return false;
+            }
+
             if (
-              health === "unhealthy" ||
-              recommendation === "cooldown"
+              health === "unhealthy"
             ) {
               return false;
             }
+
+            // A stale "cooldown" recommendation without an
+            // active timestamp must not permanently blacklist
+            // the model. It may be tested again after expiry.
 
             // Never promote a model with poor reliability.
             if (successRate < 80) {
@@ -647,6 +668,53 @@ class AiModelAnalyticsService {
             "deprioritize";
         }
 
+        // ==================================================
+        // FOX MODEL COOLDOWN ENFORCEMENT V1
+        // ==================================================
+        //
+        // A model is temporarily removed from Adaptive Router
+        // selection when enough real evidence shows instability.
+        //
+        // Default cooldown = 30 minutes.
+        // After expiry the model becomes eligible again.
+        // ==================================================
+
+        const previousCooldownUntil =
+          old.cooldownUntil
+            ? String(old.cooldownUntil)
+            : null;
+
+        let cooldownUntil =
+          previousCooldownUntil;
+
+        let cooldownReason =
+          old.cooldownReason || null;
+
+        if (
+          routingRecommendation ===
+          "cooldown"
+        ) {
+          cooldownUntil =
+            new Date(
+              Date.now() +
+              30 * 60 * 1000
+            ).toISOString();
+
+          cooldownReason =
+            successRate < 50
+              ? "low_success_rate"
+              : "low_adaptive_score";
+        } else if (
+          cooldownUntil &&
+          new Date(
+            cooldownUntil
+          ).getTime() <= Date.now()
+        ) {
+          // Expired cooldown is cleared automatically.
+          cooldownUntil = null;
+          cooldownReason = null;
+        }
+
         tx.set(
           ref,
           {
@@ -680,6 +748,9 @@ class AiModelAnalyticsService {
 
             routingRecommendation,
             toolRecommendation,
+
+            cooldownUntil,
+            cooldownReason,
 
             healthStatus,
 

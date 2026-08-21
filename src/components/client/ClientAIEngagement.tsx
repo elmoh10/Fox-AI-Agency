@@ -39,6 +39,32 @@ type ModelHealth = {
   toolSuccesses?: number;
   fallbackRequests?: number;
   healthStatus?: string;
+
+  // FOX ADAPTIVE HEALTH CENTER V2
+  reliabilityScore?: number;
+  latencyScore?: number;
+  toolScore?: number;
+  adaptiveScore?: number;
+  adaptiveToolScore?: number;
+  toolSuccessRate?: number | null;
+
+  routingRecommendation?:
+    | "preferred"
+    | "normal"
+    | "deprioritize"
+    | "cooldown"
+    | string;
+
+  toolRecommendation?:
+    | "preferred"
+    | "normal"
+    | "deprioritize"
+    | string;
+
+  // FOX COOLDOWN UI V1
+  cooldownUntil?: string | null;
+  cooldownReason?: string | null;
+
   lastAgentRole?: string;
   lastUsedAt?: any;
 };
@@ -159,6 +185,116 @@ const healthClass = (status?: string) => {
   }
 
   return "bg-red-50 text-red-700 border-red-200 dark:bg-red-500/10 dark:text-red-400 dark:border-red-500/20";
+};
+
+// ============================================================
+// FOX ADAPTIVE HEALTH CENTER V2
+// ============================================================
+
+const adaptiveScoreClass = (score?: number) => {
+  const value = safeNumber(score);
+
+  if (value >= 85) {
+    return "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-400 dark:border-emerald-500/20";
+  }
+
+  if (value >= 65) {
+    return "bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-500/10 dark:text-blue-400 dark:border-blue-500/20";
+  }
+
+  if (value >= 45) {
+    return "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-500/10 dark:text-amber-400 dark:border-amber-500/20";
+  }
+
+  return "bg-red-50 text-red-700 border-red-200 dark:bg-red-500/10 dark:text-red-400 dark:border-red-500/20";
+};
+
+const recommendationClass = (
+  recommendation?: string
+) => {
+  switch (
+    String(recommendation || "normal").toLowerCase()
+  ) {
+    case "preferred":
+      return "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-400 dark:border-emerald-500/20";
+
+    case "cooldown":
+      return "bg-red-50 text-red-700 border-red-200 dark:bg-red-500/10 dark:text-red-400 dark:border-red-500/20";
+
+    case "deprioritize":
+      return "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-500/10 dark:text-amber-400 dark:border-amber-500/20";
+
+    default:
+      return "bg-slate-100 text-slate-600 border-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:border-slate-700";
+  }
+};
+
+// ============================================================
+// FOX COOLDOWN UI V1
+// ============================================================
+
+const getCooldownDisplay = (
+  cooldownUntil?: string | null
+) => {
+  if (!cooldownUntil) {
+    return {
+      active: false,
+      label: "—",
+      remainingMs: 0,
+    };
+  }
+
+  const expiresAt =
+    new Date(cooldownUntil).getTime();
+
+  const remainingMs =
+    expiresAt - Date.now();
+
+  if (
+    !Number.isFinite(expiresAt) ||
+    remainingMs <= 0
+  ) {
+    return {
+      active: false,
+      label: "Expired",
+      remainingMs: 0,
+    };
+  }
+
+  const minutes =
+    Math.max(
+      1,
+      Math.ceil(
+        remainingMs / 60000
+      )
+    );
+
+  return {
+    active: true,
+    label: `${minutes}m`,
+    remainingMs,
+  };
+};
+
+const recommendationLabel = (
+  recommendation?: string
+) => {
+  const value =
+    String(recommendation || "normal").toLowerCase();
+
+  switch (value) {
+    case "preferred":
+      return "Preferred";
+
+    case "deprioritize":
+      return "Deprioritize";
+
+    case "cooldown":
+      return "Cooldown";
+
+    default:
+      return "Normal";
+  }
 };
 
 const providerClass = (provider?: string) => {
@@ -605,7 +741,7 @@ export const ClientAIEngagement:
           </div>
 
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[1050px] text-left text-xs">
+            <table className="w-full min-w-[1580px] text-left text-xs">
               <thead className="bg-slate-50 text-[10px] uppercase tracking-wider text-slate-400 dark:bg-slate-950/40">
                 <tr>
                   <th className="px-5 py-3">
@@ -632,6 +768,27 @@ export const ClientAIEngagement:
                   <th className="px-4 py-3 text-center">
                     Fallback
                   </th>
+
+                  <th className="px-4 py-3 text-center">
+                    AI Score
+                  </th>
+
+                  <th className="px-4 py-3 text-center">
+                    Tool Score
+                  </th>
+
+                  <th className="px-4 py-3 text-center">
+                    Routing
+                  </th>
+
+                  <th className="px-4 py-3 text-center">
+                    Tool Route
+                  </th>
+
+                  <th className="px-4 py-3 text-center">
+                    Cooldown
+                  </th>
+
                   <th className="px-4 py-3 text-center">
                     Health
                   </th>
@@ -643,7 +800,7 @@ export const ClientAIEngagement:
                 healthLoaded ? (
                   <tr>
                     <td
-                      colSpan={9}
+                      colSpan={14}
                       className="px-5 py-12 text-center text-sm font-bold text-slate-400"
                     >
                       {isAr
@@ -732,6 +889,97 @@ export const ClientAIEngagement:
                           {safeNumber(
                             model.fallbackRequests
                           )}
+                        </td>
+
+                        {/* FOX ADAPTIVE HEALTH CENTER V2 */}
+
+                        <td className="px-4 py-4 text-center">
+                          <span
+                            title={`Reliability ${safeNumber(
+                              model.reliabilityScore
+                            ).toFixed(1)}% • Latency ${safeNumber(
+                              model.latencyScore
+                            ).toFixed(1)}%`}
+                            className={`inline-flex min-w-[58px] justify-center rounded-full border px-2.5 py-1 text-[10px] font-black ${adaptiveScoreClass(
+                              model.adaptiveScore
+                            )}`}
+                          >
+                            {safeNumber(
+                              model.adaptiveScore
+                            ).toFixed(1)}
+                          </span>
+                        </td>
+
+                        <td className="px-4 py-4 text-center">
+                          <span
+                            title={`Tool success ${
+                              model.toolSuccessRate == null
+                                ? "No evidence"
+                                : `${safeNumber(
+                                    model.toolSuccessRate
+                                  ).toFixed(1)}%`
+                            }`}
+                            className={`inline-flex min-w-[58px] justify-center rounded-full border px-2.5 py-1 text-[10px] font-black ${adaptiveScoreClass(
+                              model.adaptiveToolScore
+                            )}`}
+                          >
+                            {safeNumber(
+                              model.adaptiveToolScore
+                            ).toFixed(1)}
+                          </span>
+                        </td>
+
+                        <td className="px-4 py-4 text-center">
+                          <span
+                            className={`inline-flex rounded-full border px-2.5 py-1 text-[9px] font-black uppercase ${recommendationClass(
+                              model.routingRecommendation
+                            )}`}
+                          >
+                            {recommendationLabel(
+                              model.routingRecommendation
+                            )}
+                          </span>
+                        </td>
+
+                        <td className="px-4 py-4 text-center">
+                          <span
+                            className={`inline-flex rounded-full border px-2.5 py-1 text-[9px] font-black uppercase ${recommendationClass(
+                              model.toolRecommendation
+                            )}`}
+                          >
+                            {recommendationLabel(
+                              model.toolRecommendation
+                            )}
+                          </span>
+                        </td>
+
+                        {/* FOX COOLDOWN UI V1 */}
+                        <td className="px-4 py-4 text-center">
+                          {(() => {
+                            const cooldown =
+                              getCooldownDisplay(
+                                model.cooldownUntil
+                              );
+
+                            return (
+                              <span
+                                title={
+                                  model.cooldownReason
+                                    ? `Reason: ${model.cooldownReason}`
+                                    : ""
+                                }
+                                className={`inline-flex min-w-[58px] justify-center rounded-full border px-2.5 py-1 text-[10px] font-black ${
+                                  cooldown.active
+                                    ? "border-red-200 bg-red-50 text-red-700 dark:border-red-500/20 dark:bg-red-500/10 dark:text-red-400"
+                                    : cooldown.label === "Expired"
+                                    ? "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-400"
+                                    : "border-slate-200 bg-slate-100 text-slate-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-400"
+                                }`}
+                              >
+                                {cooldown.label}
+                              </span>
+                            );
+                          })()}
                         </td>
 
                         <td className="px-4 py-4 text-center">
