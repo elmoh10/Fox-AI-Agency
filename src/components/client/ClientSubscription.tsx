@@ -318,7 +318,7 @@ export const ClientSubscription: React.FC = () => {
 
           <div className="mt-3 rounded-xl bg-emerald-50 p-3 text-xs text-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-200 border border-emerald-200 dark:border-emerald-800">
             <p className="font-extrabold">{isAr ? "عنوان حساب InstaPay الرسمي:" : "Official Instapay Account:"}</p>
-            <p className="font-mono text-xs font-bold">instapay@foxai.agency</p>
+            <p className="font-mono text-xs font-bold">etch2410@instapay</p>
             <p className="text-[10px] text-emerald-700 dark:text-emerald-300">
               {isAr
                 ? "قم بتحويل المبلغ المطلوبة، ثم ارفع صورة إيصال التحويل واكتب رقم المرجع ليقوم صاحب الوكالة بالاعتماد وإرسال الكود."

@@ -125,6 +125,17 @@ export interface InstapayPayment {
   approvedAt?: string;
   generatedCode?: string;
   rejectionReason?: string;
+  // FOX PRODUCTION BILLING V1
+  approvedBy?: string;
+  rejectedAt?: string;
+  rejectedBy?: string;
+
+  activatedAt?: string;
+  subscriptionExpiresAt?: string;
+
+
+  pricingSource?: "plan_config" | "extra_package";
+  paymentMethod?: "instapay";
 }
 
 export interface SubscriberModificationRequest {

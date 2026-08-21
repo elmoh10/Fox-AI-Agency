@@ -534,10 +534,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return saved ? JSON.parse(saved) : [];
   });
 
-  const [payments, setPayments] = useState<InstapayPayment[]>(() => {
-    const saved = localStorage.getItem("fox_payments");
-    return saved ? JSON.parse(saved) : [];
-  });
+  // =========================================================
+  // FOX PRODUCTION BILLING V1 - FIRESTORE PAYMENTS
+  // =========================================================
+  // Firestore is the source of truth.
+  // Local React state is only the live UI cache.
+  const [payments, setPayments] =
+    useState<InstapayPayment[]>([]);
+
+  useCollectionSync(
+    "payments",
+    setPayments
+  );
 
   const [crmLeads, setCrmLeads] = useState<CustomerLead[]>(() => {
     const saved = localStorage.getItem("fox_leads");
@@ -922,9 +930,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     localStorage.setItem("fox_codes", JSON.stringify(activationCodes));
   }, [activationCodes]);
 
-  useEffect(() => {
-    localStorage.setItem("fox_payments", JSON.stringify(payments));
-  }, [payments]);
+  // FOX Production Billing:
+  // payments are persisted in Firestore, not localStorage.
 
   useEffect(() => {
     localStorage.setItem("fox_leads", JSON.stringify(crmLeads));
@@ -1449,86 +1456,694 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     extraPackageName?: string,
     extraConversationsCount?: number
   ) => {
-    const targetWsId = !isSuperAdmin ? currentWorkspace?.id || workspaceId : workspaceId;
-    const ws = workspaces.find((w) => w.id === targetWsId);
+    const targetWsId =
+      !isSuperAdmin
+        ? currentWorkspace?.id || workspaceId
+        : workspaceId;
 
-    const newPayment: InstapayPayment = {
-      id: `pay_${Math.random().toString(36).substring(2, 8)}`,
-      workspaceId: targetWsId,
-      workspaceName: ws?.name || "Client Workspace",
+    const ws =
+      workspaces.find(
+        (w) => w.id === targetWsId
+      );
+
+    if (!ws) {
+      addToast(
+        language === "ar"
+          ? "تعذر العثور على المنشأة."
+          : "Workspace not found.",
+        "error"
+      );
+      return;
+    }
+
+    const cleanTxRef =
+      String(txRef || "")
+        .trim()
+        .toUpperCase();
+
+    const cleanProof =
+      String(screenshotUrl || "")
+        .trim();
+
+    if (!cleanTxRef) {
+      addToast(
+        language === "ar"
+          ? "الرقم المرجعي للتحويل مطلوب."
+          : "Transaction reference is required.",
+        "error"
+      );
+      return;
+    }
+
+    if (!cleanProof) {
+      addToast(
+        language === "ar"
+          ? "يجب إرفاق إثبات التحويل."
+          : "Payment proof is required.",
+        "error"
+      );
+      return;
+    }
+
+    // Prevent duplicate transaction references.
+    const duplicated =
+      payments.some(
+        (payment) =>
+          String(
+            payment.transactionRef || ""
+          )
+            .trim()
+            .toUpperCase() === cleanTxRef &&
+          payment.status !== "rejected"
+      );
+
+    if (duplicated) {
+      addToast(
+        language === "ar"
+          ? "هذا الرقم المرجعي مستخدم في طلب دفع سابق."
+          : "This transaction reference was already submitted.",
+        "error"
+      );
+      return;
+    }
+
+    let verifiedAmount =
+      Number(amountEGP || 0);
+
+    let pricingSource:
+      "plan_config" |
+      "extra_package" =
+      "extra_package";
+
+    // NEVER trust the amount coming from the client UI
+    // when purchasing a subscription plan.
+    if (paymentType === "plan") {
+      const plan =
+        plans.find(
+          (x) => x.id === planId
+        );
+
+      if (!plan) {
+        addToast(
+          language === "ar"
+            ? "الباقة المحددة غير موجودة."
+            : "Selected plan was not found.",
+          "error"
+        );
+        return;
+      }
+
+      verifiedAmount =
+        Number(
+          plan.priceEGP || 0
+        );
+
+      pricingSource =
+        "plan_config";
+    }
+
+    if (
+      !Number.isFinite(
+        verifiedAmount
+      ) ||
+      verifiedAmount < 0
+    ) {
+      addToast(
+        language === "ar"
+          ? "قيمة الدفع غير صحيحة."
+          : "Invalid payment amount.",
+        "error"
+      );
+      return;
+    }
+
+    const paymentId =
+      `pay_${Date.now()}_${Math.random()
+        .toString(36)
+        .slice(2, 8)}`;
+
+    const payment: InstapayPayment = {
+      id: paymentId,
+
+      workspaceId:
+        targetWsId,
+
+      workspaceName:
+        ws.name,
+
       planId,
       paymentType,
+
       extraPackageName,
       extraConversationsCount,
-      amountEGP,
-      screenshotUrl,
-      transactionRef: txRef,
-      status: "pending",
-      submittedAt: new Date().toISOString().replace("T", " ").substring(0, 16),
+
+      amountEGP:
+        verifiedAmount,
+
+      screenshotUrl:
+        cleanProof,
+
+      transactionRef:
+        cleanTxRef,
+
+      status:
+        "pending",
+
+      submittedAt:
+        new Date().toISOString(),
+
+      pricingSource,
+
+      paymentMethod:
+        "instapay",
     };
 
-    setPayments((prev) => [newPayment, ...prev]);
+    setPayments(
+      (prev) => [
+        payment,
+        ...prev.filter(
+          (x) => x.id !== paymentId
+        ),
+      ]
+    );
+
+    setDoc(
+      doc(
+        db,
+        "payments",
+        paymentId
+      ),
+      sanitizeForFirestore(
+        payment
+      )
+    ).catch((error) => {
+      console.error(
+        "❌ [FOX Billing] Payment save failed:",
+        error
+      );
+
+      setPayments(
+        (prev) =>
+          prev.filter(
+            (x) =>
+              x.id !== paymentId
+          )
+      );
+
+      addToast(
+        language === "ar"
+          ? "تعذر حفظ طلب الدفع."
+          : "Unable to save payment request.",
+        "error"
+      );
+    });
+
     addToast(
       language === "ar"
-        ? "تم رفع إيصال الدفع عبر إنستاباي بنجاح! سيتم مراجعته وتفعيل الباقة فوراً."
-        : "Instapay screenshot uploaded! Super Admin will review shortly.",
+        ? "تم إرسال إثبات التحويل للمراجعة."
+        : "Payment proof submitted for review.",
       "success"
     );
   };
 
-  const approvePayment = (paymentId: string) => {
+
+  const approvePayment = (
+    paymentId: string
+  ) => {
     if (!isSuperAdmin) {
-      addToast("هذا الإجراء متاح فقط لمدير النظام Super Admin", "error");
+      addToast(
+        "هذا الإجراء متاح فقط لمدير النظام Super Admin",
+        "error"
+      );
       return;
     }
-    const payment = payments.find((p) => p.id === paymentId);
-    if (!payment) return;
 
-    let generated: ActivationCode;
-    if (payment.paymentType === "extra_package") {
-      generated = generateActivationCode(
-        payment.planId,
-        30,
-        "extra_package",
-        payment.extraConversationsCount || 500
+    const payment =
+      payments.find(
+        (x) =>
+          x.id === paymentId
       );
-    } else {
-      generated = generateActivationCode(payment.planId, 30, "plan");
+
+    if (!payment) {
+      addToast(
+        language === "ar"
+          ? "طلب الدفع غير موجود."
+          : "Payment request not found.",
+        "error"
+      );
+      return;
     }
 
-    setPayments((prev) =>
-      prev.map((p) =>
-        p.id === paymentId
-          ? {
-              ...p,
-              status: "approved",
-              approvedAt: new Date().toISOString().replace("T", " ").substring(0, 16),
-              generatedCode: generated.code,
-            }
-          : p
+    if (
+      payment.status !==
+      "pending"
+    ) {
+      addToast(
+        language === "ar"
+          ? "يمكن اعتماد طلبات الدفع المعلقة فقط."
+          : "Only pending payments can be approved.",
+        "error"
+      );
+      return;
+    }
+
+    const ws =
+      workspaces.find(
+        (x) =>
+          x.id ===
+          payment.workspaceId
+      );
+
+    if (!ws) {
+      addToast(
+        language === "ar"
+          ? "المنشأة المرتبطة بالدفع غير موجودة."
+          : "Workspace linked to this payment was not found.",
+        "error"
+      );
+      return;
+    }
+
+    const now =
+      new Date();
+
+    const nowIso =
+      now.toISOString();
+
+    let newExpiry:
+      string | undefined =
+      undefined;
+
+    // =====================================================
+    // MAIN PLAN PAYMENT
+    // =====================================================
+
+    if (
+      payment.paymentType !==
+      "extra_package"
+    ) {
+      const selectedPlan =
+        plans.find(
+          (x) =>
+            x.id ===
+            payment.planId
+        );
+
+      if (!selectedPlan) {
+        addToast(
+          language === "ar"
+            ? "الباقة لم تعد موجودة."
+            : "Subscription plan no longer exists.",
+          "error"
+        );
+        return;
+      }
+
+      const expectedAmount =
+        Number(
+          selectedPlan.priceEGP || 0
+        );
+
+      if (
+        Number(
+          payment.amountEGP
+        ) !== expectedAmount
+      ) {
+        addToast(
+          language === "ar"
+            ? `قيمة الدفع لا تطابق سعر الباقة الحالي: ${expectedAmount} ج.م`
+            : `Payment does not match current plan price: ${expectedAmount} EGP`,
+          "error"
+        );
+        return;
+      }
+
+      // Renewal:
+      // If subscription is still active,
+      // extend 30 days from current expiry.
+      // Otherwise start 30 days from today.
+      const existingExpiry =
+        ws.subscriptionExpiresAt
+          ? new Date(
+              `${ws.subscriptionExpiresAt}T23:59:59`
+            )
+          : null;
+
+      const base =
+        existingExpiry &&
+        Number.isFinite(
+          existingExpiry.getTime()
+        ) &&
+        existingExpiry > now
+          ? existingExpiry
+          : now;
+
+      const expiry =
+        new Date(
+          base.getTime() +
+            30 *
+              24 *
+              60 *
+              60 *
+              1000
+        );
+
+      newExpiry =
+        expiry
+          .toISOString()
+          .split("T")[0];
+
+      const updates:
+        Partial<Workspace> = {
+        planId:
+          payment.planId,
+
+        status:
+          "active",
+
+        subscriptionExpiresAt:
+          newExpiry,
+
+        // New monthly cycle.
+        aiConversationsUsed:
+          0,
+      };
+
+      setWorkspaces(
+        (prev) =>
+          prev.map(
+            (item) =>
+              item.id === ws.id
+                ? {
+                    ...item,
+                    ...updates,
+                  }
+                : item
+          )
+      );
+
+      setDoc(
+        doc(
+          db,
+          "workspaces",
+          ws.id
+        ),
+        sanitizeForFirestore(
+          updates
+        ),
+        {
+          merge: true,
+        }
+      ).catch((error) =>
+        console.error(
+          "❌ [FOX Billing] Subscription activation failed:",
+          error
+        )
+      );
+
+    } else {
+      // ===================================================
+      // EXTRA CONVERSATION PACKAGE
+      // ===================================================
+
+      const conversations =
+        Math.max(
+          0,
+          Number(
+            payment.extraConversationsCount ||
+            0
+          )
+        );
+
+      if (
+        conversations <= 0
+      ) {
+        addToast(
+          language === "ar"
+            ? "عدد المحادثات الإضافية غير صحيح."
+            : "Invalid extra conversation amount.",
+          "error"
+        );
+        return;
+      }
+
+      const pkg: ExtraPackage = {
+        id:
+          `pkg_${Date.now()}_${Math.random()
+            .toString(36)
+            .slice(2, 7)}`,
+
+        name:
+          payment.extraPackageName ||
+          `+${conversations} conversations`,
+
+        conversationsAdded:
+          conversations,
+
+        priceEGP:
+          Number(
+            payment.amountEGP || 0
+          ),
+
+        addedAt:
+          nowIso,
+      };
+
+      const updates:
+        Partial<Workspace> = {
+        extraConversationsLimit:
+          Number(
+            ws.extraConversationsLimit ||
+            0
+          ) +
+          conversations,
+
+        extraPackages: [
+          ...(ws.extraPackages || []),
+          pkg,
+        ],
+      };
+
+      setWorkspaces(
+        (prev) =>
+          prev.map(
+            (item) =>
+              item.id === ws.id
+                ? {
+                    ...item,
+                    ...updates,
+                  }
+                : item
+          )
+      );
+
+      setDoc(
+        doc(
+          db,
+          "workspaces",
+          ws.id
+        ),
+        sanitizeForFirestore(
+          updates
+        ),
+        {
+          merge: true,
+        }
+      ).catch((error) =>
+        console.error(
+          "❌ [FOX Billing] Extra package activation failed:",
+          error
+        )
+      );
+    }
+
+    const generatedCode =
+      payment.generatedCode ||
+      (
+        payment.paymentType ===
+        "extra_package"
+          ? `FOX-EXTRA-PAID-${Date.now()
+              .toString()
+              .slice(-6)}`
+          : `FOX-PAID-${String(
+              payment.planId
+            ).toUpperCase()}-${Date.now()
+              .toString()
+              .slice(-6)}`
+      );
+
+    const paymentUpdate:
+      Partial<InstapayPayment> = {
+      status:
+        "approved",
+
+      approvedAt:
+        nowIso,
+
+      approvedBy:
+        currentUser?.email ||
+        "super_admin",
+
+      activatedAt:
+        nowIso,
+
+      generatedCode,
+
+      subscriptionExpiresAt:
+        newExpiry,
+    };
+
+    setPayments(
+      (prev) =>
+        prev.map(
+          (item) =>
+            item.id === paymentId
+              ? {
+                  ...item,
+                  ...paymentUpdate,
+                }
+              : item
+        )
+    );
+
+    setDoc(
+      doc(
+        db,
+        "payments",
+        paymentId
+      ),
+      sanitizeForFirestore(
+        paymentUpdate
+      ),
+      {
+        merge: true,
+      }
+    ).catch((error) =>
+      console.error(
+        "❌ [FOX Billing] Payment approval save failed:",
+        error
       )
     );
 
-    // Auto redeem for the workspace
-    redeemActivationCode(payment.workspaceId, generated.code);
     addToast(
-      language === "ar"
-        ? `تم اعتماد التحويل وتفعيل الكود ${generated.code} بنجاح!`
-        : `Payment approved! Code ${generated.code} applied.`,
+      payment.paymentType ===
+      "extra_package"
+        ? language === "ar"
+          ? "✅ تم اعتماد الدفع وإضافة المحادثات."
+          : "✅ Payment approved and conversations added."
+        : language === "ar"
+        ? `✅ تم اعتماد الدفع وتفعيل الباقة حتى ${newExpiry}.`
+        : `✅ Payment approved. Subscription active until ${newExpiry}.`,
       "success"
     );
   };
 
-  const rejectPayment = (paymentId: string, reason: string) => {
+
+  const rejectPayment = (
+    paymentId: string,
+    reason: string
+  ) => {
     if (!isSuperAdmin) {
-      addToast("هذا الإجراء متاح فقط لمدير النظام Super Admin", "error");
+      addToast(
+        "هذا الإجراء متاح فقط لمدير النظام Super Admin",
+        "error"
+      );
       return;
     }
-    setPayments((prev) =>
-      prev.map((p) => (p.id === paymentId ? { ...p, status: "rejected", rejectionReason: reason } : p))
+
+    const payment =
+      payments.find(
+        (x) =>
+          x.id === paymentId
+      );
+
+    if (!payment) {
+      return;
+    }
+
+    if (
+      payment.status !==
+      "pending"
+    ) {
+      addToast(
+        language === "ar"
+          ? "يمكن رفض الطلبات المعلقة فقط."
+          : "Only pending payments can be rejected.",
+        "error"
+      );
+      return;
+    }
+
+    const cleanReason =
+      String(reason || "")
+        .trim();
+
+    if (!cleanReason) {
+      addToast(
+        language === "ar"
+          ? "اكتب سبب الرفض."
+          : "Enter a rejection reason.",
+        "error"
+      );
+      return;
+    }
+
+    const updates:
+      Partial<InstapayPayment> = {
+      status:
+        "rejected",
+
+      rejectionReason:
+        cleanReason,
+
+      rejectedAt:
+        new Date().toISOString(),
+
+      rejectedBy:
+        currentUser?.email ||
+        "super_admin",
+    };
+
+    setPayments(
+      (prev) =>
+        prev.map(
+          (item) =>
+            item.id === paymentId
+              ? {
+                  ...item,
+                  ...updates,
+                }
+              : item
+        )
     );
-    addToast("Payment rejected", "info");
+
+    setDoc(
+      doc(
+        db,
+        "payments",
+        paymentId
+      ),
+      sanitizeForFirestore(
+        updates
+      ),
+      {
+        merge: true,
+      }
+    ).catch((error) =>
+      console.error(
+        "❌ [FOX Billing] Rejection save failed:",
+        error
+      )
+    );
+
+    addToast(
+      language === "ar"
+        ? "تم رفض طلب الدفع وتسجيل السبب."
+        : "Payment rejected and reason recorded.",
+      "info"
+    );
   };
+
 
   const updateWorkspaceStatus = (workspaceId: string, status: "active" | "pending" | "suspended") => {
     if (!isSuperAdmin) {
