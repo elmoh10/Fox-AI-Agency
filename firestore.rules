@@ -82,11 +82,22 @@ service cloud.firestore {
           isSuperAdmin()
         );
 
-      // User may create only their own profile.
+      // FOX PRODUCTION REGISTRATION:
+      // A newly authenticated user may create only their own
+      // client_owner profile, and only for a workspace that
+      // already declares them as ownerUid.
       allow create: if signedIn() &&
-        request.auth.uid == userId;
+        request.auth.uid == userId &&
+        request.resource.data.role == "client_owner" &&
+        request.resource.data.workspaceId is string &&
+        exists(
+          /databases/$(database)/documents/workspaces/$(request.resource.data.workspaceId)
+        ) &&
+        get(
+          /databases/$(database)/documents/workspaces/$(request.resource.data.workspaceId)
+        ).data.ownerUid == request.auth.uid;
 
-      // Client cannot modify role/workspace ownership.
+      // Client cannot elevate role or jump between tenants.
       allow update: if signedIn() &&
         (
           isSuperAdmin() ||
@@ -107,15 +118,48 @@ service cloud.firestore {
     match /workspaces/{workspaceId} {
       allow read: if isWorkspaceMember(workspaceId);
 
-      // Workspace creation is normally handled by the backend.
-      // Authenticated client may create only its assigned workspace.
+      // FOX PRODUCTION REGISTRATION:
+      //
+      // createUserWithEmailAndPassword authenticates the user first.
+      // The first workspace may therefore be created before users/{uid}.
+      //
+      // Critical protections:
+      // - document must not already exist
+      // - ownerUid must be the authenticated Firebase UID
+      // - client cannot choose another owner
       allow create: if signedIn() &&
         (
           isSuperAdmin() ||
-          userWorkspaceId() == workspaceId
+          (
+            !exists(
+              /databases/$(database)/documents/workspaces/$(workspaceId)
+            ) &&
+            request.resource.data.ownerUid == request.auth.uid &&
+            request.resource.data.ownerEmail == request.auth.token.email
+          )
         );
 
-      allow update: if isWorkspaceMember(workspaceId);
+      // Tenant owners can change operational workspace settings,
+      // but never billing / entitlement / ownership security fields.
+      allow update: if signedIn() &&
+        (
+          isSuperAdmin() ||
+          (
+            isWorkspaceMember(workspaceId) &&
+            !request.resource.data
+              .diff(resource.data)
+              .affectedKeys()
+              .hasAny([
+                "ownerUid",
+                "planId",
+                "status",
+                "subscriptionExpiresAt",
+                "aiConversationsUsed",
+                "extraConversationsLimit",
+                "extraPackages"
+              ])
+          )
+        );
 
       allow delete: if isSuperAdmin();
 

@@ -14,3 +14,4 @@ firebase-admin-key.json
 .env.development.local
 *.before-*
 firebase-debug.log
+env.txt
