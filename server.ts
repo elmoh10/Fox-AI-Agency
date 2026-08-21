@@ -3604,38 +3604,58 @@ async function stopWorkspaceTelegramPolling(workspaceId: string) {
 async function startWorkspaceTelegramPolling(workspaceId: string) {
   const workspace = getWorkspaceById(workspaceId);
 
-  if (!workspace) return;
+  if (!workspace) {
+    console.warn(
+      `⚠️ [Workspace Telegram] Workspace not found | Workspace=${workspaceId}`
+    );
+    return;
+  }
 
   const token =
     await getWorkspaceTelegramRuntimeToken(
       workspace
     );
 
-  if (!token || workspace.telegramBotStatus === "disconnected") {
+  if (
+    !token ||
+    workspace.telegramBotStatus === "disconnected"
+  ) {
+    console.warn(
+      `⚠️ [Workspace Telegram] Polling skipped | ` +
+      `Workspace=${workspace.name || workspaceId} | ` +
+      `Token=${token ? "AVAILABLE" : "MISSING"} | ` +
+      `Status=${workspace.telegramBotStatus || "unknown"}`
+    );
+
     await stopWorkspaceTelegramPolling(workspaceId);
     return;
   }
 
-  const existingState = workspaceTelegramPollers.get(workspaceId);
+  const existingState =
+    workspaceTelegramPollers.get(workspaceId);
 
-  // Already starting or polling the same token.
-  // Reserve the workspace BEFORE any awaited Telegram API calls
-  // so concurrent workspace syncs cannot create duplicate pollers.
   if (
     existingState &&
     existingState.running &&
     existingState.token === token
   ) {
+    console.log(
+      `ℹ️ [Workspace Telegram] Poller already active | ` +
+      `${workspace.name || workspaceId}`
+    );
     return;
   }
 
-  // Token changed: stop old worker first.
   if (existingState) {
     existingState.running = false;
     workspaceTelegramPollers.delete(workspaceId);
+
+    console.log(
+      `🔄 [Workspace Telegram] Existing poller stopped | ` +
+      `${workspace.name || workspaceId}`
+    );
   }
 
-  // Reserve immediately to prevent duplicate concurrent starts.
   const state: WorkspaceTelegramPollingState = {
     running: true,
     offset: 0,
@@ -3644,7 +3664,8 @@ async function startWorkspaceTelegramPolling(workspaceId: string) {
 
   workspaceTelegramPollers.set(workspaceId, state);
 
-  const botInfo = await callWorkspaceTelegramApi(token, "getMe");
+  const botInfo =
+    await callWorkspaceTelegramApi(token, "getMe");
 
   if (!botInfo?.ok) {
     state.running = false;
@@ -3653,75 +3674,203 @@ async function startWorkspaceTelegramPolling(workspaceId: string) {
       workspaceTelegramPollers.delete(workspaceId);
     }
 
-    console.warn(
-      `❌ [Workspace Telegram] Invalid token for ${workspace.name || workspaceId}`
+    console.error(
+      `❌ [Workspace Telegram] Invalid token | ` +
+      `Workspace=${workspace.name || workspaceId} | ` +
+      `Error=${botInfo?.description || "Unknown Telegram error"}`
     );
     return;
   }
 
-  // Polling mode requires webhook to be disabled for this client bot.
-  await callWorkspaceTelegramApi(token, "deleteWebhook", {
-    drop_pending_updates: false,
-  }).catch(() => {});
+  const deleteWebhookResult =
+    await callWorkspaceTelegramApi(
+      token,
+      "deleteWebhook",
+      {
+        drop_pending_updates: false,
+      }
+    ).catch((error) => {
+      console.error(
+        `❌ [Workspace Telegram] deleteWebhook failed | ` +
+        `${workspace.name || workspaceId}:`,
+        error
+      );
+      return null;
+    });
+
+  if (!deleteWebhookResult?.ok) {
+    console.warn(
+      `⚠️ [Workspace Telegram] deleteWebhook warning | ` +
+      `${workspace.name || workspaceId} | ` +
+      `${deleteWebhookResult?.description || "Unknown error"}`
+    );
+  }
 
   console.log(
-    `🤖 [Workspace Telegram Connected] ${workspace.name || workspaceId} -> @${botInfo.result?.username || "unknown_bot"}`
+    `🤖 [Workspace Telegram Connected] ` +
+    `${workspace.name || workspaceId} -> ` +
+    `@${botInfo.result?.username || "unknown_bot"}`
+  );
+
+  console.log(
+    `🚀 [Workspace Telegram Polling Started] ` +
+    `${workspace.name || workspaceId} | ` +
+    `Workspace=${workspaceId}`
   );
 
   const poll = async () => {
-    const current = workspaceTelegramPollers.get(workspaceId);
+    const current =
+      workspaceTelegramPollers.get(workspaceId);
 
-    if (!current || !current.running || current.token !== token) {
+    if (
+      !current ||
+      !current.running ||
+      current.token !== token
+    ) {
+      console.log(
+        `🛑 [Workspace Telegram Polling Stopped] ` +
+        `${workspace.name || workspaceId}`
+      );
       return;
     }
 
+    let response: Response | null = null;
+
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 10000);
+      const timeoutId = setTimeout(
+        () => controller.abort(),
+        10000
+      );
 
-      const response = await fetch(
-        `https://api.telegram.org/bot${token}/getUpdates?offset=${current.offset}&timeout=3`,
-        { signal: controller.signal }
-      ).catch(() => null);
+      const url =
+        `https://api.telegram.org/bot${token}` +
+        `/getUpdates` +
+        `?offset=${current.offset}` +
+        `&timeout=3`;
 
-      clearTimeout(timeoutId);
+      try {
+        response = await fetch(url, {
+          signal: controller.signal,
+        });
+      } catch (fetchError: any) {
+        console.error(
+          `❌ [Workspace Telegram Polling Fetch] ` +
+          `${workspace.name || workspaceId} | ` +
+          `${fetchError?.name || "Error"}: ` +
+          `${fetchError?.message || fetchError}`
+        );
+      } finally {
+        clearTimeout(timeoutId);
+      }
 
-      if (response?.ok) {
-        const data = await response.json().catch(() => null);
+      if (!response) {
+        return;
+      }
 
-        if (data?.ok && Array.isArray(data.result)) {
-          for (const update of data.result) {
-            current.offset = Math.max(
-              current.offset,
-              Number(update.update_id || 0) + 1
-            );
+      if (!response.ok) {
+        const errorBody =
+          await response.text().catch(() => "");
 
-            const latestWorkspace = getWorkspaceById(workspaceId);
+        console.error(
+          `❌ [Workspace Telegram Polling HTTP] ` +
+          `${workspace.name || workspaceId} | ` +
+          `Workspace=${workspaceId} | ` +
+          `Status=${response.status} | ` +
+          `${errorBody}`
+        );
+        return;
+      }
 
-            if (latestWorkspace) {
-              await handleWorkspaceTelegramUpdate(
-                latestWorkspace,
-                update
-              );
-            }
-          }
+      const data: any =
+        await response.json().catch((parseError) => {
+          console.error(
+            `❌ [Workspace Telegram Polling JSON] ` +
+            `${workspace.name || workspaceId}:`,
+            parseError
+          );
+          return null;
+        });
+
+      if (!data) {
+        return;
+      }
+
+      if (!data.ok) {
+        console.error(
+          `❌ [Workspace Telegram API Error] ` +
+          `${workspace.name || workspaceId} | ` +
+          `${data.description || "Unknown Telegram API error"}`
+        );
+        return;
+      }
+
+      if (!Array.isArray(data.result)) {
+        console.warn(
+          `⚠️ [Workspace Telegram] Invalid updates payload | ` +
+          `${workspace.name || workspaceId}`
+        );
+        return;
+      }
+
+      if (data.result.length > 0) {
+        console.log(
+          `📥 [Workspace Telegram Updates] ` +
+          `${workspace.name || workspaceId} | ` +
+          `Count=${data.result.length}`
+        );
+      }
+
+      for (const update of data.result) {
+        current.offset = Math.max(
+          current.offset,
+          Number(update.update_id || 0) + 1
+        );
+
+        const latestWorkspace =
+          getWorkspaceById(workspaceId);
+
+        if (!latestWorkspace) {
+          console.warn(
+            `⚠️ [Workspace Telegram] Workspace disappeared during polling | ` +
+            `Workspace=${workspaceId}`
+          );
+          continue;
+        }
+
+        try {
+          await handleWorkspaceTelegramUpdate(
+            latestWorkspace,
+            update
+          );
+        } catch (updateError) {
+          console.error(
+            `❌ [Workspace Telegram Update Handler] ` +
+            `${latestWorkspace.name || workspaceId}:`,
+            updateError
+          );
         }
       }
     } catch (err) {
-      console.warn(
-        `[Workspace Telegram Polling] ${workspace.name || workspaceId}:`,
+      console.error(
+        `❌ [Workspace Telegram Polling Runtime] ` +
+        `${workspace.name || workspaceId}:`,
         err
       );
     } finally {
-      const latest = workspaceTelegramPollers.get(workspaceId);
+      const latest =
+        workspaceTelegramPollers.get(workspaceId);
 
-      if (latest?.running && latest.token === token) {
+      if (
+        latest?.running &&
+        latest.token === token
+      ) {
         setTimeout(poll, 1000);
       }
     }
   };
 
-  poll();
+  void poll();
 }
 
 async function syncWorkspaceTelegramBots() {
