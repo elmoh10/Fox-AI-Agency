@@ -1,4 +1,42 @@
 import React, { useEffect, useState } from "react";
+
+// FOX CLIENT BROWSER HARDENING V1
+// Deterrence only. Real secrets must never be shipped to the browser.
+const useClientBrowserHardening = () => {
+  useEffect(() => {
+    if (!import.meta.env.PROD) return;
+
+    const blockContextMenu = (event: MouseEvent) => {
+      event.preventDefault();
+    };
+
+    const blockDevShortcuts = (event: KeyboardEvent) => {
+      const key = event.key.toLowerCase();
+
+      const blocked =
+        event.key === "F12" ||
+        (event.ctrlKey && event.shiftKey &&
+          ["i", "j", "c"].includes(key)) ||
+        (event.ctrlKey && key === "u") ||
+        (event.metaKey && event.altKey &&
+          ["i", "j", "c"].includes(key));
+
+      if (blocked) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    };
+
+    document.addEventListener("contextmenu", blockContextMenu);
+    document.addEventListener("keydown", blockDevShortcuts, true);
+
+    return () => {
+      document.removeEventListener("contextmenu", blockContextMenu);
+      document.removeEventListener("keydown", blockDevShortcuts, true);
+    };
+  }, []);
+};
+
 import { AppProvider, useApp } from "./context/AppContext";
 import { Navbar } from "./components/Navbar";
 import { Sidebar, ViewTab } from "./components/Sidebar";
@@ -489,6 +527,7 @@ const AppContent: React.FC = () => {
 };
 
 export function App() {
+  useClientBrowserHardening();
   return (
     <AppProvider>
       <AppContent />

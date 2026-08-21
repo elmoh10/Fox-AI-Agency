@@ -61,7 +61,7 @@ export const PublicLandingPage: React.FC<PublicLandingPageProps> = ({ onLoginCli
   const isAr = language === "ar";
 
   const [activeTab, setActiveTab] = useState<"landing" | "login" | "register">("login");
-  const [selectedPlanForReg, setSelectedPlanForReg] = useState<PlanId>("business");
+  const [selectedPlanForReg, setSelectedPlanForReg] = useState<PlanId>("starter");
 
   // Active Screen Mockup Tab for Showcase Section
   const [activeScreenTab, setActiveScreenTab] = useState<"inbox" | "n8n" | "analytics" | "telegram" | "clients">("inbox");

@@ -5603,6 +5603,761 @@ function requireSuperAdmin(
   return next();
 }
 
+
+// ============================================================
+// FOX PRODUCTION ACTIVATION SECURITY V2
+// ============================================================
+//
+// SECURITY MODEL:
+//
+// - Activation codes live ONLY in Firestore/backend.
+// - Browser never receives the full activation-code database.
+// - Only Super Admin may list/create/revoke codes.
+// - Tenant may submit ONE code for its own workspace.
+// - Server verifies ownership, expiry and one-time usage.
+// - Browser supplied planId/duration/credits are NEVER trusted.
+// - Firestore transaction prevents double redemption.
+//
+// ============================================================
+
+function normalizeFoxActivationCode(value: unknown): string {
+  return String(value || "")
+    .trim()
+    .toUpperCase();
+}
+
+function generateSecureFoxActivationCode(): string {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+  const makePart = (length: number) => {
+    const bytes = randomBytes(length);
+
+    return Array.from(bytes)
+      .map((byte) => alphabet[byte % alphabet.length])
+      .join("");
+  };
+
+  return `FOX-${makePart(5)}-${makePart(5)}-${makePart(5)}`;
+}
+
+
+// ------------------------------------------------------------
+// SUPER ADMIN — LIST ACTIVATION CODES
+// ------------------------------------------------------------
+
+app.get(
+  "/api/admin/activation-codes",
+  authenticateFirebaseRequest,
+  requireSuperAdmin,
+  async (_req, res) => {
+    try {
+      const snapshot = await adminDb
+        .collection("activationCodes")
+        .orderBy("createdAt", "desc")
+        .limit(500)
+        .get();
+
+      const codes = snapshot.docs.map((docSnap) => {
+        const data: any = docSnap.data() || {};
+
+        return {
+          id: docSnap.id,
+          code: data.code,
+          planId: data.planId,
+          codeType: data.codeType || "plan",
+          extraConversationsCount:
+            data.extraConversationsCount || 0,
+          durationDays:
+            Number(data.durationDays || 0),
+          isUsed:
+            Boolean(data.isUsed),
+          createdBy:
+            data.createdBy || "super_admin",
+          usedByWorkspaceId:
+            data.usedByWorkspaceId || null,
+          usedByWorkspaceName:
+            data.usedByWorkspaceName || null,
+          createdAt:
+            data.createdAt || "",
+          expiresAt:
+            data.expiresAt || "",
+          usedAt:
+            data.usedAt || null,
+        };
+      });
+
+      return res.json({
+        success: true,
+        codes,
+      });
+
+    } catch (error) {
+      console.error(
+        "❌ [FOX Activation] Failed to list codes:",
+        error
+      );
+
+      return res.status(500).json({
+        success: false,
+        code: "ACTIVATION_LIST_FAILED",
+        error: "Unable to load activation codes",
+      });
+    }
+  }
+);
+
+
+// ------------------------------------------------------------
+// SUPER ADMIN — CREATE ACTIVATION CODE
+// ------------------------------------------------------------
+
+app.post(
+  "/api/admin/activation-codes",
+  authenticateFirebaseRequest,
+  requireSuperAdmin,
+  async (req, res) => {
+    try {
+      const {
+        planId,
+        durationDays = 30,
+        codeType = "plan",
+        extraConversationsCount = 0,
+      } = req.body || {};
+
+      const allowedPlans = [
+        "starter",
+        "business",
+        "enterprise",
+      ];
+
+      if (
+        codeType !== "plan" &&
+        codeType !== "extra_package"
+      ) {
+        return res.status(400).json({
+          success: false,
+          code: "INVALID_CODE_TYPE",
+          error: "Invalid activation code type",
+        });
+      }
+
+      if (
+        codeType === "plan" &&
+        !allowedPlans.includes(String(planId))
+      ) {
+        return res.status(400).json({
+          success: false,
+          code: "INVALID_PLAN",
+          error: "Invalid subscription plan",
+        });
+      }
+
+      const safeDuration =
+        Math.max(
+          1,
+          Math.min(
+            3650,
+            Number(durationDays) || 30
+          )
+        );
+
+      const safeExtraCredits =
+        Math.max(
+          0,
+          Math.floor(
+            Number(extraConversationsCount) || 0
+          )
+        );
+
+      if (
+        codeType === "extra_package" &&
+        safeExtraCredits <= 0
+      ) {
+        return res.status(400).json({
+          success: false,
+          code: "INVALID_EXTRA_CREDITS",
+          error:
+            "Extra conversation count must be greater than zero",
+        });
+      }
+
+      let code = "";
+      let codeRef: any = null;
+
+      // Extremely unlikely collision, but check anyway.
+      for (let attempt = 0; attempt < 5; attempt++) {
+        code =
+          generateSecureFoxActivationCode();
+
+        codeRef =
+          adminDb
+            .collection("activationCodes")
+            .doc(code);
+
+        const existing =
+          await codeRef.get();
+
+        if (!existing.exists) {
+          break;
+        }
+
+        code = "";
+        codeRef = null;
+      }
+
+      if (!code || !codeRef) {
+        return res.status(500).json({
+          success: false,
+          code: "CODE_GENERATION_FAILED",
+          error:
+            "Could not generate unique activation code",
+        });
+      }
+
+      const now =
+        new Date();
+
+      const expiresAt =
+        new Date(
+          now.getTime() +
+            90 *
+              24 *
+              60 *
+              60 *
+              1000
+        ).toISOString();
+
+      const record = {
+        code,
+        planId:
+          codeType === "plan"
+            ? String(planId)
+            : null,
+        codeType,
+        extraConversationsCount:
+          codeType === "extra_package"
+            ? safeExtraCredits
+            : 0,
+        durationDays:
+          safeDuration,
+        isUsed: false,
+
+        createdBy:
+          req.foxAuth.uid,
+
+        createdByEmail:
+          req.foxAuth.email || null,
+
+        createdAt:
+          now.toISOString(),
+
+        expiresAt,
+
+        usedByWorkspaceId: null,
+        usedByWorkspaceName: null,
+        usedAt: null,
+      };
+
+      await codeRef.create(record);
+
+      console.log(
+        `🔑 [FOX Activation] Code created | Type=${codeType} | Plan=${planId || "-"} | Admin=${req.foxAuth.uid}`
+      );
+
+      return res.status(201).json({
+        success: true,
+        activationCode: {
+          id: code,
+          ...record,
+        },
+      });
+
+    } catch (error) {
+      console.error(
+        "❌ [FOX Activation] Code creation failed:",
+        error
+      );
+
+      return res.status(500).json({
+        success: false,
+        code: "ACTIVATION_CREATE_FAILED",
+        error:
+          "Unable to create activation code",
+      });
+    }
+  }
+);
+
+
+// ------------------------------------------------------------
+// SUPER ADMIN — REVOKE UNUSED ACTIVATION CODE
+// ------------------------------------------------------------
+
+app.delete(
+  "/api/admin/activation-codes/:codeId",
+  authenticateFirebaseRequest,
+  requireSuperAdmin,
+  async (req, res) => {
+    try {
+      const codeId =
+        normalizeFoxActivationCode(
+          req.params.codeId
+        );
+
+      if (!codeId) {
+        return res.status(400).json({
+          success: false,
+          error:
+            "Activation code is required",
+        });
+      }
+
+      const ref =
+        adminDb
+          .collection("activationCodes")
+          .doc(codeId);
+
+      const snapshot =
+        await ref.get();
+
+      if (!snapshot.exists) {
+        return res.status(404).json({
+          success: false,
+          code: "CODE_NOT_FOUND",
+          error:
+            "Activation code not found",
+        });
+      }
+
+      const data: any =
+        snapshot.data() || {};
+
+      if (data.isUsed) {
+        return res.status(409).json({
+          success: false,
+          code: "CODE_ALREADY_USED",
+          error:
+            "Used activation codes cannot be revoked",
+        });
+      }
+
+      await ref.delete();
+
+      console.log(
+        `🗑️ [FOX Activation] Code revoked | Admin=${req.foxAuth.uid}`
+      );
+
+      return res.json({
+        success: true,
+      });
+
+    } catch (error) {
+      console.error(
+        "❌ [FOX Activation] Revoke failed:",
+        error
+      );
+
+      return res.status(500).json({
+        success: false,
+        code: "ACTIVATION_REVOKE_FAILED",
+        error:
+          "Unable to revoke activation code",
+      });
+    }
+  }
+);
+
+
+// ------------------------------------------------------------
+// TENANT — REDEEM ACTIVATION CODE
+// ------------------------------------------------------------
+
+app.post(
+  "/api/workspaces/:workspaceId/redeem-activation-code",
+  authenticateFirebaseRequest,
+  async (req, res) => {
+    try {
+      const workspaceId =
+        String(
+          req.params.workspaceId || ""
+        ).trim();
+
+      const trustedWorkspace =
+        requireAuthenticatedWorkspace(
+          req,
+          res,
+          workspaceId
+        );
+
+      if (!trustedWorkspace) {
+        return;
+      }
+
+      const code =
+        normalizeFoxActivationCode(
+          req.body?.code
+        );
+
+      if (!code) {
+        return res.status(400).json({
+          success: false,
+          code: "ACTIVATION_CODE_REQUIRED",
+          error:
+            "Activation code is required",
+        });
+      }
+
+      const codeRef =
+        adminDb
+          .collection("activationCodes")
+          .doc(code);
+
+      const workspaceRef =
+        adminDb
+          .collection("workspaces")
+          .doc(workspaceId);
+
+      let responsePayload: any = null;
+
+      await adminDb.runTransaction(
+        async (transaction) => {
+          const [
+            codeSnapshot,
+            workspaceSnapshot,
+          ] = await Promise.all([
+            transaction.get(codeRef),
+            transaction.get(workspaceRef),
+          ]);
+
+          if (!codeSnapshot.exists) {
+            const err: any =
+              new Error(
+                "INVALID_ACTIVATION_CODE"
+              );
+
+            err.foxCode =
+              "INVALID_ACTIVATION_CODE";
+
+            throw err;
+          }
+
+          if (!workspaceSnapshot.exists) {
+            const err: any =
+              new Error(
+                "WORKSPACE_NOT_FOUND"
+              );
+
+            err.foxCode =
+              "WORKSPACE_NOT_FOUND";
+
+            throw err;
+          }
+
+          const codeData: any =
+            codeSnapshot.data() || {};
+
+          const workspaceData: any =
+            workspaceSnapshot.data() || {};
+
+          if (codeData.isUsed) {
+            const err: any =
+              new Error(
+                "ACTIVATION_CODE_ALREADY_USED"
+              );
+
+            err.foxCode =
+              "ACTIVATION_CODE_ALREADY_USED";
+
+            throw err;
+          }
+
+          if (
+            codeData.expiresAt &&
+            new Date(
+              codeData.expiresAt
+            ).getTime() <
+              Date.now()
+          ) {
+            const err: any =
+              new Error(
+                "ACTIVATION_CODE_EXPIRED"
+              );
+
+            err.foxCode =
+              "ACTIVATION_CODE_EXPIRED";
+
+            throw err;
+          }
+
+          const codeType =
+            codeData.codeType ||
+            "plan";
+
+          const now =
+            new Date();
+
+          const workspaceUpdate: any = {
+            updatedAt:
+              now.toISOString(),
+          };
+
+          if (codeType === "plan") {
+            const allowedPlans = [
+              "starter",
+              "business",
+              "enterprise",
+            ];
+
+            const trustedPlanId =
+              String(
+                codeData.planId || ""
+              );
+
+            if (
+              !allowedPlans.includes(
+                trustedPlanId
+              )
+            ) {
+              const err: any =
+                new Error(
+                  "INVALID_CODE_PLAN"
+                );
+
+              err.foxCode =
+                "INVALID_CODE_PLAN";
+
+              throw err;
+            }
+
+            const durationDays =
+              Math.max(
+                1,
+                Number(
+                  codeData.durationDays
+                ) || 30
+              );
+
+            const existingExpiry =
+              workspaceData
+                .subscriptionExpiresAt
+                ? new Date(
+                    `${workspaceData.subscriptionExpiresAt}T23:59:59`
+                  )
+                : null;
+
+            const baseDate =
+              existingExpiry &&
+              existingExpiry.getTime() >
+                now.getTime()
+                ? existingExpiry
+                : now;
+
+            const newExpiry =
+              new Date(
+                baseDate.getTime() +
+                  durationDays *
+                    24 *
+                    60 *
+                    60 *
+                    1000
+              );
+
+            workspaceUpdate.planId =
+              trustedPlanId;
+
+            workspaceUpdate.status =
+              "active";
+
+            workspaceUpdate.subscriptionExpiresAt =
+              newExpiry
+                .toISOString()
+                .split("T")[0];
+
+            responsePayload = {
+              codeType: "plan",
+              planId:
+                trustedPlanId,
+              subscriptionExpiresAt:
+                workspaceUpdate
+                  .subscriptionExpiresAt,
+            };
+
+          } else if (
+            codeType ===
+            "extra_package"
+          ) {
+            const extraCredits =
+              Math.max(
+                0,
+                Math.floor(
+                  Number(
+                    codeData
+                      .extraConversationsCount
+                  ) || 0
+                )
+              );
+
+            if (extraCredits <= 0) {
+              const err: any =
+                new Error(
+                  "INVALID_EXTRA_PACKAGE"
+                );
+
+              err.foxCode =
+                "INVALID_EXTRA_PACKAGE";
+
+              throw err;
+            }
+
+            const currentExtra =
+              Math.max(
+                0,
+                Number(
+                  workspaceData
+                    .extraConversationsLimit
+                ) || 0
+              );
+
+            workspaceUpdate
+              .extraConversationsLimit =
+              currentExtra +
+              extraCredits;
+
+            responsePayload = {
+              codeType:
+                "extra_package",
+              extraConversationsCount:
+                extraCredits,
+              extraConversationsLimit:
+                workspaceUpdate
+                  .extraConversationsLimit,
+            };
+
+          } else {
+            const err: any =
+              new Error(
+                "INVALID_CODE_TYPE"
+              );
+
+            err.foxCode =
+              "INVALID_CODE_TYPE";
+
+            throw err;
+          }
+
+          transaction.update(
+            workspaceRef,
+            workspaceUpdate
+          );
+
+          transaction.update(
+            codeRef,
+            {
+              isUsed: true,
+              usedByWorkspaceId:
+                workspaceId,
+              usedByWorkspaceName:
+                workspaceData.name ||
+                trustedWorkspace.name ||
+                workspaceId,
+              usedAt:
+                now.toISOString(),
+            }
+          );
+        }
+      );
+
+      // Refresh backend runtime cache.
+      const cacheIndex =
+        registeredWorkspacesStore.findIndex(
+          (workspace) =>
+            workspace.id ===
+            workspaceId
+        );
+
+      if (cacheIndex >= 0) {
+        registeredWorkspacesStore[
+          cacheIndex
+        ] = {
+          ...registeredWorkspacesStore[
+            cacheIndex
+          ],
+          ...(responsePayload?.planId
+            ? {
+                planId:
+                  responsePayload.planId,
+                subscriptionExpiresAt:
+                  responsePayload
+                    .subscriptionExpiresAt,
+                status: "active",
+              }
+            : {}),
+          ...(responsePayload
+            ?.extraConversationsLimit !=
+          null
+            ? {
+                extraConversationsLimit:
+                  responsePayload
+                    .extraConversationsLimit,
+              }
+            : {}),
+        };
+      }
+
+      console.log(
+        `✅ [FOX Activation] Redeemed | Workspace=${workspaceId} | Type=${responsePayload?.codeType}`
+      );
+
+      return res.json({
+        success: true,
+        ...responsePayload,
+      });
+
+    } catch (error: any) {
+      const foxCode =
+        error?.foxCode ||
+        error?.message;
+
+      const knownErrors:
+        Record<string, number> = {
+        INVALID_ACTIVATION_CODE: 404,
+        ACTIVATION_CODE_ALREADY_USED: 409,
+        ACTIVATION_CODE_EXPIRED: 410,
+        WORKSPACE_NOT_FOUND: 404,
+        INVALID_CODE_PLAN: 400,
+        INVALID_EXTRA_PACKAGE: 400,
+        INVALID_CODE_TYPE: 400,
+      };
+
+      if (knownErrors[foxCode]) {
+        return res
+          .status(
+            knownErrors[foxCode]
+          )
+          .json({
+            success: false,
+            code: foxCode,
+            error: foxCode,
+          });
+      }
+
+      console.error(
+        "❌ [FOX Activation] Redeem failed:",
+        error
+      );
+
+      return res.status(500).json({
+        success: false,
+        code: "ACTIVATION_REDEEM_FAILED",
+        error:
+          "Unable to redeem activation code",
+      });
+    }
+  }
+);
+
+
+
 // Telegram Toggle Active Status Endpoint
 app.post(
   "/api/telegram/toggle-status",

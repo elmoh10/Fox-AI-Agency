@@ -174,9 +174,15 @@ interface AppContextType {
     durationDays?: number,
     codeType?: 'plan' | 'extra_package',
     extraConversationsCount?: number
-  ) => ActivationCode;
-  revokeActivationCode: (codeId: string) => void;
-  redeemActivationCode: (workspaceId: string, codeStr: string) => boolean;
+  ) => Promise<ActivationCode | null>;
+
+  revokeActivationCode: (
+    codeId: string
+  ) => Promise<boolean>;
+  redeemActivationCode: (
+    workspaceId: string,
+    codeStr: string
+  ) => Promise<boolean>;
   submitInstapayPayment: (
     workspaceId: string,
     planId: PlanId,
@@ -538,10 +544,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const interval = setInterval(syncTelegramRegistrations, 4000);
     return () => clearInterval(interval);
   }, []);
-  const [activationCodes, setActivationCodes] = useState<ActivationCode[]>(() => {
-    const saved = localStorage.getItem("fox_codes");
-    return saved ? JSON.parse(saved) : [];
-  });
+  // FOX ACTIVATION SECURITY V2
+  // Activation code inventory is never loaded from browser storage.
+  // Only Super Admin may receive it from the authenticated backend.
+  const [activationCodes, setActivationCodes] =
+    useState<ActivationCode[]>([]);
 
   // =========================================================
   // FOX PRODUCTION BILLING V1 - FIRESTORE PAYMENTS
@@ -935,9 +942,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     localStorage.setItem("fox_workspaces", JSON.stringify(workspaces));
   }, [workspaces]);
 
+  // Remove any legacy activation-code cache from the browser.
   useEffect(() => {
-    localStorage.setItem("fox_codes", JSON.stringify(activationCodes));
-  }, [activationCodes]);
+    localStorage.removeItem("fox_codes");
+  }, []);
 
   // FOX Production Billing:
   // payments are persisted in Firestore, not localStorage.
@@ -1366,14 +1374,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         });
 
       if (hasUsedTrial) {
-        planId = "business";
-
         addToast(
           language === "ar"
-            ? "تم العثور على تسجيل سابق بنفس البريد أو الهاتف، لذلك لن يتم منح تجربة مجانية جديدة."
-            : "A previous registration was found for this email or phone, so another free trial will not be granted.",
-          "info"
+            ? "هذا البريد الإلكتروني أو رقم الهاتف استفاد من التجربة المجانية من قبل. لا يمكن بدء تجربة مجانية جديدة. استخدم الاشتراك المدفوع أو كود تفعيل صالح."
+            : "This email or phone already used the free trial. Another free trial cannot be created. Please use a paid subscription or a valid activation code.",
+          "error"
         );
+
+        return null;
       }
     }
 
@@ -1712,132 +1720,330 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const generateActivationCode = (
-    planId: PlanId,
-    durationDays: number = 30,
-    codeType: 'plan' | 'extra_package' = 'plan',
-    extraConversationsCount?: number
-  ): ActivationCode => {
-    if (!isSuperAdmin) {
-      addToast("هذا الإجراء متاح فقط لمدير النظام Super Admin", "error");
-      throw new Error("Unauthorized");
-    }
+  // =========================================================
+  // FOX SECURE ADMIN ACTIVATION V1
+  // =========================================================
 
-    let codeStr = "";
-    if (codeType === "extra_package") {
-      const convs = extraConversationsCount || 500;
-      const randNum = Math.floor(1000 + Math.random() * 9000);
-      codeStr = `FOX-EXTRA-${convs}-${randNum}`;
-    } else {
-      const prefix = planId === "starter" ? "STR" : planId === "business" ? "BUS" : "ENT";
-      const randNum = Math.floor(1000 + Math.random() * 9000);
-      codeStr = `FOX-${prefix}-${randNum}-${String.fromCharCode(65 + Math.floor(Math.random() * 26))}`;
-    }
+  const loadActivationCodesForAdmin =
+    async (): Promise<ActivationCode[]> => {
 
-    const newCode: ActivationCode = {
-      id: `act_${Math.random().toString(36).substring(2, 8)}`,
-      code: codeStr,
-      planId,
-      codeType,
-      extraConversationsCount,
-      durationDays,
-      isUsed: false,
-      createdBy: currentUser?.email || "Admin",
-      createdAt: new Date().toISOString().split("T")[0],
-      expiresAt: new Date(Date.now() + 180 * 24 * 60 * 60 * 1000).toISOString().split("T")[0],
+      if (!isSuperAdmin) {
+        setActivationCodes([]);
+        return [];
+      }
+
+      try {
+        const response =
+          await authenticatedFetch(
+            "/api/admin/activation-codes"
+          );
+
+        const data =
+          await response.json();
+
+        if (!response.ok) {
+          throw new Error(
+            data?.error ||
+              "Unable to load activation codes"
+          );
+        }
+
+        const codes =
+          Array.isArray(data?.codes)
+            ? data.codes
+            : [];
+
+        setActivationCodes(codes);
+
+        return codes;
+
+      } catch (error) {
+        console.error(
+          "[FOX Activation Admin] Load failed:",
+          error
+        );
+
+        setActivationCodes([]);
+
+        return [];
+      }
     };
 
-    setActivationCodes((prev) => [newCode, ...prev]);
-    addToast(`Generated code: ${codeStr}`, "success");
-    return newCode;
-  };
 
-  const revokeActivationCode = (codeId: string) => {
+  const generateActivationCode = async (
+    planId: PlanId,
+    durationDays: number = 30,
+    codeType:
+      | "plan"
+      | "extra_package" =
+      "plan",
+    extraConversationsCount?: number
+  ): Promise<ActivationCode | null> => {
+
     if (!isSuperAdmin) {
-      addToast("هذا الإجراء متاح فقط لمدير النظام Super Admin", "error");
-      return;
+      addToast(
+        language === "ar"
+          ? "هذا الإجراء متاح فقط لمدير النظام Super Admin"
+          : "Super Admin access required.",
+        "error"
+      );
+
+      return null;
     }
-    setActivationCodes((prev) => prev.filter((c) => c.id !== codeId));
-    addToast("Activation code revoked", "info");
+
+    try {
+      const response =
+        await authenticatedFetch(
+          "/api/admin/activation-codes",
+          {
+            method: "POST",
+            body: JSON.stringify({
+              planId,
+              durationDays,
+              codeType,
+              extraConversationsCount:
+                extraConversationsCount || 0,
+            }),
+          }
+        );
+
+      const data =
+        await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data?.error ||
+            "Unable to generate activation code"
+        );
+      }
+
+      const created =
+        data.activationCode as ActivationCode;
+
+      await loadActivationCodesForAdmin();
+
+      addToast(
+        language === "ar"
+          ? `تم إنشاء كود التفعيل ${created.code}`
+          : `Activation code created: ${created.code}`,
+        "success"
+      );
+
+      return created;
+
+    } catch (error) {
+      console.error(
+        "[FOX Activation Admin] Create failed:",
+        error
+      );
+
+      addToast(
+        language === "ar"
+          ? "تعذر إنشاء كود التفعيل."
+          : "Unable to generate activation code.",
+        "error"
+      );
+
+      return null;
+    }
   };
 
-  const redeemActivationCode = (workspaceId: string, codeStr: string): boolean => {
-    const targetWsId = !isSuperAdmin ? currentWorkspace?.id || workspaceId : workspaceId;
-    const codeObj = activationCodes.find(
-      (c) => c.code.trim().toUpperCase() === codeStr.trim().toUpperCase() && !c.isUsed
-    );
 
-    if (!codeObj) {
-      addToast(language === "ar" ? "كود التفعيل غير صحيح أو تم استخدامه سابقاً!" : "Invalid or already used activation code!", "error");
+  const revokeActivationCode =
+    async (
+      codeId: string
+    ): Promise<boolean> => {
+
+      if (!isSuperAdmin) {
+        addToast(
+          language === "ar"
+            ? "هذا الإجراء متاح فقط لمدير النظام Super Admin"
+            : "Super Admin access required.",
+          "error"
+        );
+
+        return false;
+      }
+
+      try {
+        const response =
+          await authenticatedFetch(
+            `/api/admin/activation-codes/${encodeURIComponent(codeId)}`,
+            {
+              method: "DELETE",
+            }
+          );
+
+        const data =
+          await response.json();
+
+        if (!response.ok) {
+          throw new Error(
+            data?.error ||
+              "Unable to revoke activation code"
+          );
+        }
+
+        await loadActivationCodesForAdmin();
+
+        addToast(
+          language === "ar"
+            ? "تم إلغاء كود التفعيل."
+            : "Activation code revoked.",
+          "info"
+        );
+
+        return true;
+
+      } catch (error) {
+        console.error(
+          "[FOX Activation Admin] Revoke failed:",
+          error
+        );
+
+        addToast(
+          language === "ar"
+            ? "تعذر إلغاء كود التفعيل."
+            : "Unable to revoke activation code.",
+          "error"
+        );
+
+        return false;
+      }
+    };
+
+
+  // Load code inventory only for Super Admin.
+  useEffect(() => {
+    if (
+      currentUser?.role ===
+      "super_admin"
+    ) {
+      void loadActivationCodesForAdmin();
+    } else {
+      // Tenant/client browsers must never retain code inventory.
+      setActivationCodes([]);
+      localStorage.removeItem("fox_codes");
+    }
+  }, [
+    currentUser?.id,
+    currentUser?.role,
+  ]);
+
+
+  // =========================================================
+  // FOX SECURE CLIENT REDEEM V1
+  // Activation-code inventory never participates in client validation.
+  // The browser submits only the code typed by the customer.
+  // =========================================================
+  const redeemActivationCode = async (
+    workspaceId: string,
+    codeStr: string
+  ): Promise<boolean> => {
+    const cleanCode =
+      String(codeStr || "").trim();
+
+    if (!cleanCode) {
+      addToast(
+        language === "ar"
+          ? "يرجى إدخال كود التفعيل."
+          : "Please enter an activation code.",
+        "error"
+      );
+
       return false;
     }
 
-    const ws = workspaces.find((w) => w.id === targetWsId);
-    const wsName = ws?.name || "Workspace";
+    try {
+      const response =
+        await authenticatedFetch(
+          `/api/workspaces/${encodeURIComponent(workspaceId)}/redeem-activation-code`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              code: cleanCode,
+            }),
+          }
+        );
 
-    if (codeObj.codeType === "extra_package" || (codeObj.extraConversationsCount && codeObj.extraConversationsCount > 0)) {
-      const convsToAdd = codeObj.extraConversationsCount || 500;
-      setWorkspaces((prev) =>
-        prev.map((w) => {
-          if (w.id === targetWsId) {
-            const newExtraLimit = (w.extraConversationsLimit || 0) + convsToAdd;
-            const newPackage: ExtraPackage = {
-              id: `pkg_${Math.random().toString(36).substring(2, 9)}`,
-              name: `باقة إضافية +${convsToAdd} محادثة (كود تفعيل)`,
-              conversationsAdded: convsToAdd,
-              priceEGP: 0,
-              addedAt: new Date().toISOString().split("T")[0],
-            };
-            return {
-              ...w,
-              extraConversationsLimit: newExtraLimit,
-              extraPackages: [...(w.extraPackages || []), newPackage],
-            };
-          }
-          return w;
-        })
+      const data =
+        await response.json();
+
+      if (!response.ok) {
+        const errorCode =
+          String(data?.code || "");
+
+        let message =
+          language === "ar"
+            ? "كود التفعيل غير صحيح."
+            : "Invalid activation code.";
+
+        if (
+          errorCode ===
+          "ACTIVATION_CODE_ALREADY_USED"
+        ) {
+          message =
+            language === "ar"
+              ? "تم استخدام كود التفعيل من قبل."
+              : "This activation code has already been used.";
+        }
+
+        if (
+          errorCode ===
+          "ACTIVATION_CODE_EXPIRED"
+        ) {
+          message =
+            language === "ar"
+              ? "انتهت صلاحية كود التفعيل."
+              : "This activation code has expired.";
+        }
+
+        addToast(
+          message,
+          "error"
+        );
+
+        return false;
+      }
+
+      if (
+        data?.codeType ===
+        "extra_package"
+      ) {
+        addToast(
+          language === "ar"
+            ? `تمت إضافة ${data.extraConversationsCount || 0} محادثة بنجاح.`
+            : `${data.extraConversationsCount || 0} conversations added successfully.`,
+          "success"
+        );
+      } else {
+        addToast(
+          language === "ar"
+            ? `تم تفعيل باقة ${String(data?.planId || "").toUpperCase()} بنجاح.`
+            : `${String(data?.planId || "").toUpperCase()} plan activated successfully.`,
+          "success"
+        );
+      }
+
+      return true;
+
+    } catch (error) {
+      console.error(
+        "[FOX Activation] Secure redeem failed:",
+        error
       );
+
       addToast(
         language === "ar"
-          ? `تم تفعيل الباقة الإضافية بنجاح! (+${convsToAdd} محادثة)`
-          : `Extra Package activated! (+${convsToAdd} conversations)`,
-        "success"
+          ? "تعذر التحقق من كود التفعيل حالياً."
+          : "Unable to verify activation code right now.",
+        "error"
       );
-    } else {
-      setWorkspaces((prev) =>
-        prev.map((w) => {
-          if (w.id === targetWsId) {
-            const newExp = new Date(Date.now() + codeObj.durationDays * 24 * 60 * 60 * 1000)
-              .toISOString()
-              .split("T")[0];
-            return {
-              ...w,
-              planId: codeObj.planId,
-              status: "active",
-              subscriptionExpiresAt: newExp,
-            };
-          }
-          return w;
-        })
-      );
-      addToast(
-        language === "ar"
-          ? `تم تفعيل الباقة بنجاح: ${codeObj.planId.toUpperCase()}!`
-          : `Successfully activated plan: ${codeObj.planId.toUpperCase()}!`,
-        "success"
-      );
+
+      return false;
     }
-
-    setActivationCodes((prev) =>
-      prev.map((c) =>
-        c.id === codeObj.id
-          ? { ...c, isUsed: true, usedByWorkspaceId: targetWsId, usedByWorkspaceName: wsName }
-          : c
-      )
-    );
-
-    return true;
   };
+
 
   const submitInstapayPayment = (
     workspaceId: string,

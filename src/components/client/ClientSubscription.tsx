@@ -110,11 +110,22 @@ export const ClientSubscription: React.FC = () => {
     setScreenshotUrl("");
   };
 
-  const handleRedeemCode = (e: React.FormEvent) => {
+  const handleRedeemCode = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!activationCodeInput) return;
-    const ok = redeemActivationCode(currentWorkspace.id, activationCodeInput);
-    if (ok) setActivationCodeInput("");
+
+    if (!activationCodeInput.trim()) {
+      return;
+    }
+
+    const ok =
+      await redeemActivationCode(
+        currentWorkspace.id,
+        activationCodeInput.trim()
+      );
+
+    if (ok) {
+      setActivationCodeInput("");
+    }
   };
 
   return (
