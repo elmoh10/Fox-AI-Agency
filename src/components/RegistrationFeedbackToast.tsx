@@ -22,6 +22,7 @@ import {
 
 export const RegistrationFeedbackToast: React.FC = () => {
   const {
+    currentUser,
     latestRegistration,
     dismissRegistrationFeedback,
     setCurrentWorkspaceId,
@@ -63,7 +64,12 @@ export const RegistrationFeedbackToast: React.FC = () => {
     }
   }, [progress, latestRegistration, dismissRegistrationFeedback]);
 
-  if (!latestRegistration) return null;
+  // FOX SECURITY:
+  // Registration approval feedback contains cross-tenant/admin data.
+  // It must only ever be visible to the agency Super Admin.
+  const isSuperAdmin = currentUser?.role === "super_admin";
+
+  if (!isSuperAdmin || !latestRegistration) return null;
 
   const handleApproveRegistration = () => {
     addToast(
