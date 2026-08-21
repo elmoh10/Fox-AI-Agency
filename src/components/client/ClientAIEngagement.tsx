@@ -65,6 +65,17 @@ type ModelHealth = {
   cooldownUntil?: string | null;
   cooldownReason?: string | null;
 
+  // FOX CIRCUIT BREAKER UI V2
+  circuitBreakerLevel?: number;
+  circuitBreakerState?:
+    | "closed"
+    | "open"
+    | "recovering"
+    | string;
+
+  lastCooldownStartedAt?: string | null;
+  lastRecoveryAt?: string | null;
+
   lastAgentRole?: string;
   lastUsedAt?: any;
 };
@@ -232,6 +243,39 @@ const recommendationClass = (
 // ============================================================
 // FOX COOLDOWN UI V1
 // ============================================================
+
+// ============================================================
+// FOX CIRCUIT BREAKER UI V2
+// ============================================================
+
+const circuitStateClass = (
+  state?: string
+) => {
+  switch (
+    String(state || "closed").toLowerCase()
+  ) {
+    case "open":
+      return "bg-red-50 text-red-700 border-red-200 dark:bg-red-500/10 dark:text-red-400 dark:border-red-500/20";
+
+    case "recovering":
+      return "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-500/10 dark:text-amber-400 dark:border-amber-500/20";
+
+    default:
+      return "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-400 dark:border-emerald-500/20";
+  }
+};
+
+const circuitStateLabel = (
+  state?: string
+) => {
+  const value =
+    String(state || "closed").toLowerCase();
+
+  if (value === "open") return "OPEN";
+  if (value === "recovering") return "RECOVERING";
+
+  return "CLOSED";
+};
 
 const getCooldownDisplay = (
   cooldownUntil?: string | null
@@ -741,7 +785,7 @@ export const ClientAIEngagement:
           </div>
 
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[1580px] text-left text-xs">
+            <table className="w-full min-w-[1740px] text-left text-xs">
               <thead className="bg-slate-50 text-[10px] uppercase tracking-wider text-slate-400 dark:bg-slate-950/40">
                 <tr>
                   <th className="px-5 py-3">
@@ -786,6 +830,14 @@ export const ClientAIEngagement:
                   </th>
 
                   <th className="px-4 py-3 text-center">
+                    Circuit
+                  </th>
+
+                  <th className="px-4 py-3 text-center">
+                    Level
+                  </th>
+
+                  <th className="px-4 py-3 text-center">
                     Cooldown
                   </th>
 
@@ -800,7 +852,7 @@ export const ClientAIEngagement:
                 healthLoaded ? (
                   <tr>
                     <td
-                      colSpan={14}
+                      colSpan={16}
                       className="px-5 py-12 text-center text-sm font-bold text-slate-400"
                     >
                       {isAr
@@ -949,6 +1001,27 @@ export const ClientAIEngagement:
                           >
                             {recommendationLabel(
                               model.toolRecommendation
+                            )}
+                          </span>
+                        </td>
+
+                        {/* FOX CIRCUIT BREAKER UI V2 */}
+                        <td className="px-4 py-4 text-center">
+                          <span
+                            className={`inline-flex rounded-full border px-2.5 py-1 text-[9px] font-black ${circuitStateClass(
+                              model.circuitBreakerState
+                            )}`}
+                          >
+                            {circuitStateLabel(
+                              model.circuitBreakerState
+                            )}
+                          </span>
+                        </td>
+
+                        <td className="px-4 py-4 text-center">
+                          <span className="inline-flex min-w-[36px] justify-center rounded-full border border-slate-200 bg-slate-100 px-2 py-1 text-[10px] font-black text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
+                            {safeNumber(
+                              model.circuitBreakerLevel
                             )}
                           </span>
                         </td>

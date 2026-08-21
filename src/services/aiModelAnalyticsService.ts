@@ -669,20 +669,56 @@ class AiModelAnalyticsService {
         }
 
         // ==================================================
-        // FOX MODEL COOLDOWN ENFORCEMENT V1
+        // FOX PROGRESSIVE CIRCUIT BREAKER V2
         // ==================================================
         //
-        // A model is temporarily removed from Adaptive Router
-        // selection when enough real evidence shows instability.
+        // Repeated instability increases the cooldown:
         //
-        // Default cooldown = 30 minutes.
-        // After expiry the model becomes eligible again.
+        // Level 1 -> 15 minutes
+        // Level 2 -> 30 minutes
+        // Level 3 -> 60 minutes
+        // Level 4 -> 180 minutes
+        // Level 5+ -> 360 minutes
+        //
+        // IMPORTANT:
+        // An already-active cooldown is NOT extended by every
+        // new analytics update.
+        //
+        // Recovery:
+        // successful post-cooldown traffic gradually reduces
+        // the circuit level.
         // ==================================================
+
+        const nowMs = Date.now();
 
         const previousCooldownUntil =
           old.cooldownUntil
             ? String(old.cooldownUntil)
             : null;
+
+        const previousCooldownMs =
+          previousCooldownUntil
+            ? new Date(
+                previousCooldownUntil
+              ).getTime()
+            : 0;
+
+        const wasCooldownActive =
+          Number.isFinite(
+            previousCooldownMs
+          ) &&
+          previousCooldownMs > nowMs;
+
+        const previousCircuitLevel =
+          Math.max(
+            0,
+            Number(
+              old.circuitBreakerLevel || 0
+            )
+          );
+
+        let circuitBreakerLevel =
+          previousCircuitLevel;
 
         let cooldownUntil =
           previousCooldownUntil;
@@ -690,30 +726,107 @@ class AiModelAnalyticsService {
         let cooldownReason =
           old.cooldownReason || null;
 
+        let lastCooldownStartedAt =
+          old.lastCooldownStartedAt || null;
+
+        let lastRecoveryAt =
+          old.lastRecoveryAt || null;
+
+        const cooldownMinutesForLevel = (
+          level: number
+        ) => {
+          if (level <= 1) return 15;
+          if (level === 2) return 30;
+          if (level === 3) return 60;
+          if (level === 4) return 180;
+
+          return 360;
+        };
+
         if (
           routingRecommendation ===
-          "cooldown"
+            "cooldown" &&
+          !wasCooldownActive
         ) {
+          // A NEW circuit-breaker incident.
+          circuitBreakerLevel =
+            Math.min(
+              5,
+              previousCircuitLevel + 1
+            );
+
+          const cooldownMinutes =
+            cooldownMinutesForLevel(
+              circuitBreakerLevel
+            );
+
           cooldownUntil =
             new Date(
-              Date.now() +
-              30 * 60 * 1000
+              nowMs +
+                cooldownMinutes *
+                  60 *
+                  1000
             ).toISOString();
 
           cooldownReason =
             successRate < 50
               ? "low_success_rate"
               : "low_adaptive_score";
+
+          lastCooldownStartedAt =
+            new Date(
+              nowMs
+            ).toISOString();
         } else if (
-          cooldownUntil &&
-          new Date(
-            cooldownUntil
-          ).getTime() <= Date.now()
+          !wasCooldownActive &&
+          previousCooldownUntil &&
+          previousCooldownMs <= nowMs
         ) {
-          // Expired cooldown is cleared automatically.
+          // Previous cooldown has expired.
           cooldownUntil = null;
           cooldownReason = null;
         }
+
+        // --------------------------------------------------
+        // Progressive recovery
+        // --------------------------------------------------
+        //
+        // Do not reset the history immediately.
+        // One successful request after the cooldown period
+        // lowers the circuit level by one step.
+        //
+        // A new failure can increase it again later.
+        // --------------------------------------------------
+
+        const canRecover =
+          !wasCooldownActive &&
+          status === "success" &&
+          routingRecommendation !==
+            "cooldown" &&
+          circuitBreakerLevel > 0;
+
+        if (canRecover) {
+          circuitBreakerLevel =
+            Math.max(
+              0,
+              circuitBreakerLevel - 1
+            );
+
+          lastRecoveryAt =
+            new Date(
+              nowMs
+            ).toISOString();
+        }
+
+        const circuitBreakerState =
+          cooldownUntil &&
+          new Date(
+            cooldownUntil
+          ).getTime() > nowMs
+            ? "open"
+            : circuitBreakerLevel > 0
+            ? "recovering"
+            : "closed";
 
         tx.set(
           ref,
@@ -751,6 +864,12 @@ class AiModelAnalyticsService {
 
             cooldownUntil,
             cooldownReason,
+
+            // FOX PROGRESSIVE CIRCUIT BREAKER V2
+            circuitBreakerLevel,
+            circuitBreakerState,
+            lastCooldownStartedAt,
+            lastRecoveryAt,
 
             healthStatus,
 
