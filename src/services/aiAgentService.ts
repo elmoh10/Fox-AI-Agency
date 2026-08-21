@@ -1,3 +1,4 @@
+import { aiModelAnalyticsService } from "./aiModelAnalyticsService";
 import { GoogleGenAI, Type } from "@google/genai";
 import OpenAI from "openai";
 import { checkAvailability, bookAppointmentInSheet } from "./googleSheetsService";
@@ -3558,6 +3559,11 @@ DATE SAFETY RULES:
       // Gemini below remains the fallback provider.
       // =========================================================
 
+      // Analytics-safe state must live outside the try/catch so
+      // failure logging can access the same request information.
+      let foxOpenRouterToolsEnabledForAnalytics = false;
+      let foxOpenRouterStartedAtForAnalytics = 0;
+
       if (openRouter) {
         try {
           console.log(
@@ -3722,6 +3728,9 @@ DATE SAFETY RULES:
           const foxOpenRouterModel =
             this.getOpenRouterPrimaryModel();
 
+          const foxOpenRouterStartedAt =
+            Date.now();
+
           // =====================================================
           // FOX SMART TOOL ROUTER
           // =====================================================
@@ -3769,6 +3778,12 @@ DATE SAFETY RULES:
           const toolsEnabled =
             operationalIntent ||
             forcedBookingSales;
+
+          foxOpenRouterToolsEnabledForAnalytics =
+            toolsEnabled;
+
+          foxOpenRouterStartedAtForAnalytics =
+            foxOpenRouterStartedAt;
 
           console.log(
             `🧠 [FOX Free Router] Primary=${foxOpenRouterModel} | Fallback=openrouter/free | Tools=${toolsEnabled ? "ON" : "OFF"}`
@@ -4471,6 +4486,35 @@ DATE SAFETY RULES:
             `✅ [FOX Free Router] Response completed | Requested=${foxOpenRouterModel} | Served=${orCompletion?.model || "unknown"}`
           );
 
+          void aiModelAnalyticsService.recordUsage({
+            workspaceId: workspace.id,
+            provider: "openrouter",
+            requestedModel: foxOpenRouterModel,
+            servedModel:
+              orCompletion?.model ||
+              foxOpenRouterModel,
+            agentRole,
+            channel,
+            toolsEnabled:
+              toolsEnabled === true,
+            // openrouter/free selecting an underlying free model
+            // is normal routing, NOT a fallback.
+            //
+            // Count model-level fallback only when FOX explicitly
+            // requested a concrete model and another model served.
+            fallbackUsed:
+              foxOpenRouterModel !== "openrouter/free" &&
+              Boolean(
+                orCompletion?.model &&
+                orCompletion.model !==
+                  foxOpenRouterModel
+              ),
+            status: "success",
+            latencyMs:
+              Date.now() -
+              foxOpenRouterStartedAt,
+          });
+
           // Save bot reply in this tenant's shared memory.
           if (
             params.sessionId &&
@@ -4513,6 +4557,32 @@ DATE SAFETY RULES:
             `🟠 [OpenRouter] Primary provider failed: ${openRouterError?.message || openRouterError}`
           );
 
+          void aiModelAnalyticsService.recordUsage({
+            workspaceId: workspace.id,
+            provider: "openrouter",
+            requestedModel:
+              this.getOpenRouterPrimaryModel(),
+            servedModel:
+              this.getOpenRouterPrimaryModel(),
+            agentRole,
+            channel,
+            toolsEnabled:
+              foxOpenRouterToolsEnabledForAnalytics,
+            fallbackUsed: false,
+            status: "failure",
+            latencyMs:
+              foxOpenRouterStartedAtForAnalytics > 0
+                ? Date.now() -
+                  foxOpenRouterStartedAtForAnalytics
+                : undefined,
+            errorType:
+              openRouterError?.name ||
+              "OpenRouterError",
+            errorMessage:
+              openRouterError?.message ||
+              String(openRouterError),
+          });
+
           if (ai) {
             console.log(
               "🔵 [Gemini] Switching to fallback provider..."
@@ -4536,6 +4606,9 @@ DATE SAFETY RULES:
       let lastError;
 
       for (const model of FALLBACK_MODELS) {
+        const foxGeminiStartedAt =
+          Date.now();
+
         try {
           response = await ai.models.generateContent({
             model,
@@ -4741,6 +4814,21 @@ DATE SAFETY RULES:
           }
           
           usedModel = model;
+
+          void aiModelAnalyticsService.recordUsage({
+            workspaceId: workspace.id,
+            provider: "gemini",
+            requestedModel: model,
+            servedModel: model,
+            agentRole,
+            channel,
+            toolsEnabled: false,
+            fallbackUsed: true,
+            status: "success",
+            latencyMs:
+              Date.now() -
+              foxGeminiStartedAt,
+          });
           
           // Append AI response to shared memory
           if (params.sessionId && workspace.id) {
@@ -4755,7 +4843,32 @@ DATE SAFETY RULES:
           break; // success
         } catch (e: any) {
           lastError = e;
-          console.warn(`AiAgentService: Model ${model} failed: ${e?.message || e}. Trying next...`);
+
+          void aiModelAnalyticsService.recordUsage({
+            workspaceId: workspace.id,
+            provider: "gemini",
+            requestedModel: model,
+            servedModel: model,
+            agentRole,
+            channel,
+            toolsEnabled: false,
+            fallbackUsed: true,
+            status: "failure",
+            latencyMs:
+              Date.now() -
+              foxGeminiStartedAt,
+            errorType:
+              e?.name ||
+              "GeminiError",
+            errorMessage:
+              e?.message ||
+              String(e),
+          });
+
+          console.warn(
+            `AiAgentService: Model ${model} failed: ${e?.message || e}. Trying next...`
+          );
+
           continue; // try next
         }
       }
