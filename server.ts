@@ -31,7 +31,7 @@ import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import { aiAgentService } from "./src/services/aiAgentService";
 import { sharedMemoryService } from "./src/services/sharedMemoryService";
-import { conversationService } from "./src/services/conversationService";
+import { conversationAdminService as conversationService } from "./src/services/conversationAdminService";
 import { workspaceCrmService } from "./src/services/workspaceCrmService";
 import { crmEventService } from "./src/services/crmEventService";
 import { emailService } from "./src/services/emailService";
