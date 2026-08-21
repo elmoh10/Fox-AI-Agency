@@ -1348,9 +1348,9 @@ let registeredLeadsStore: any[] = [];
 // ==========================================================
 async function hydrateRegisteredWorkspacesFromFirestore() {
   try {
-    const snapshot = await getDocs(
-      collection(db, "workspaces")
-    );
+    const snapshot = await adminDb
+      .collection("workspaces")
+      .get();
 
     const firestoreWorkspaces = snapshot.docs
       .map((docSnap) => {
