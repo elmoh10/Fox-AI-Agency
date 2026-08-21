@@ -3725,7 +3725,7 @@ DATE SAFETY RULES:
           let orCompletion: any = null;
           let finalOpenRouterText = "";
 
-          const foxOpenRouterModel =
+          let foxOpenRouterModel =
             this.getOpenRouterPrimaryModel();
 
           const foxOpenRouterStartedAt =
@@ -3778,6 +3778,43 @@ DATE SAFETY RULES:
           const toolsEnabled =
             operationalIntent ||
             forcedBookingSales;
+
+          // =====================================================
+          // FOX ADAPTIVE ROUTER V2
+          //
+          // Only promote a concrete FREE model after enough
+          // successful real-world evidence exists.
+          //
+          // Otherwise keep openrouter/free as the safe router.
+          // =====================================================
+
+          if (
+            foxOpenRouterModel ===
+            "openrouter/free"
+          ) {
+            const adaptiveChoice =
+              await aiModelAnalyticsService
+                .getRecommendedOpenRouterModel({
+                  toolsEnabled,
+                });
+
+            if (adaptiveChoice) {
+              foxOpenRouterModel =
+                adaptiveChoice.model;
+
+              console.log(
+                `🎯 [FOX Adaptive Router] Selected=${adaptiveChoice.model} | Score=${adaptiveChoice.score} | Success=${adaptiveChoice.successRate}% | Requests=${adaptiveChoice.requests} | Latency=${adaptiveChoice.avgLatencyMs}ms | Tools=${toolsEnabled ? "ON" : "OFF"} | Reason=${adaptiveChoice.reason}`
+              );
+            } else {
+              console.log(
+                `🛡️ [FOX Adaptive Router] No proven candidate yet | Using=openrouter/free | Tools=${toolsEnabled ? "ON" : "OFF"}`
+              );
+            }
+          } else {
+            console.log(
+              `⚙️ [FOX Adaptive Router] Explicit OPENROUTER_MODEL configured | Using=${foxOpenRouterModel}`
+            );
+          }
 
           foxOpenRouterToolsEnabledForAnalytics =
             toolsEnabled;

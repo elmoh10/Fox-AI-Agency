@@ -143,6 +143,249 @@ class AiModelAnalyticsService {
     }
   }
 
+  // =========================================================
+  // FOX ADAPTIVE ROUTER V2
+  //
+  // Returns a proven free OpenRouter model only when enough
+  // production evidence exists.
+  //
+  // Otherwise returns null and FOX safely uses openrouter/free.
+  // =========================================================
+  async getRecommendedOpenRouterModel(
+    options: {
+      toolsEnabled: boolean;
+    }
+  ): Promise<{
+    model: string;
+    score: number;
+    requests: number;
+    successRate: number;
+    avgLatencyMs: number;
+    reason: string;
+  } | null> {
+    try {
+      const snapshot =
+        await adminDb
+          .collection("aiModelHealth")
+          .get();
+
+      const allModels =
+        snapshot.docs.map((doc) => ({
+          id: doc.id,
+          ...(doc.data() as any),
+        }));
+
+      const candidates =
+        allModels
+          .filter((model: any) => {
+            if (
+              String(model.provider || "")
+                .toLowerCase() !==
+              "openrouter"
+            ) {
+              return false;
+            }
+
+            const modelName =
+              String(model.model || "");
+
+            // FOX Adaptive Router V2 is intentionally
+            // FREE-MODEL ONLY.
+            if (
+              !modelName ||
+              !modelName.endsWith(":free")
+            ) {
+              return false;
+            }
+
+            const requests =
+              Number(model.requests || 0);
+
+            const successRate =
+              Number(
+                model.successRate || 0
+              );
+
+            const health =
+              String(
+                model.healthStatus || ""
+              ).toLowerCase();
+
+            const recommendation =
+              String(
+                model.routingRecommendation ||
+                "normal"
+              ).toLowerCase();
+
+            if (requests < 3) {
+              return false;
+            }
+
+            if (
+              health === "unhealthy" ||
+              recommendation === "cooldown"
+            ) {
+              return false;
+            }
+
+            // Never promote a model with poor reliability.
+            if (successRate < 80) {
+              return false;
+            }
+
+            if (options.toolsEnabled) {
+              const toolRequests =
+                Number(
+                  model.toolRequests || 0
+                );
+
+              const toolSuccessRate =
+                Number(
+                  model.toolSuccessRate || 0
+                );
+
+              const toolRecommendation =
+                String(
+                  model.toolRecommendation ||
+                  "normal"
+                ).toLowerCase();
+
+              // Tool routing requires actual evidence,
+              // not merely general-chat success.
+              if (toolRequests < 3) {
+                return false;
+              }
+
+              if (
+                toolSuccessRate < 80 ||
+                toolRecommendation ===
+                  "deprioritize"
+              ) {
+                return false;
+              }
+            }
+
+            return true;
+          })
+          .map((model: any) => {
+            const score =
+              options.toolsEnabled
+                ? Number(
+                    model.adaptiveToolScore ||
+                    0
+                  )
+                : Number(
+                    model.adaptiveScore || 0
+                  );
+
+            return {
+              model:
+                String(model.model),
+
+              score,
+
+              requests:
+                Number(
+                  model.requests || 0
+                ),
+
+              successRate:
+                Number(
+                  model.successRate || 0
+                ),
+
+              avgLatencyMs:
+                Number(
+                  model.avgLatencyMs || 0
+                ),
+
+              preferred:
+                String(
+                  options.toolsEnabled
+                    ? model.toolRecommendation
+                    : model.routingRecommendation
+                ).toLowerCase() ===
+                "preferred",
+            };
+          });
+
+      if (candidates.length === 0) {
+        return null;
+      }
+
+      // Preferred recommendation wins first.
+      //
+      // Then:
+      // 1. Adaptive score
+      // 2. Success rate
+      // 3. Lower latency
+      // 4. More evidence / requests
+      candidates.sort((a, b) => {
+        if (
+          a.preferred !== b.preferred
+        ) {
+          return a.preferred ? -1 : 1;
+        }
+
+        if (b.score !== a.score) {
+          return b.score - a.score;
+        }
+
+        if (
+          b.successRate !==
+          a.successRate
+        ) {
+          return (
+            b.successRate -
+            a.successRate
+          );
+        }
+
+        if (
+          a.avgLatencyMs !==
+          b.avgLatencyMs
+        ) {
+          return (
+            a.avgLatencyMs -
+            b.avgLatencyMs
+          );
+        }
+
+        return (
+          b.requests -
+          a.requests
+        );
+      });
+
+      const winner =
+        candidates[0];
+
+      return {
+        model: winner.model,
+        score: winner.score,
+        requests: winner.requests,
+        successRate:
+          winner.successRate,
+        avgLatencyMs:
+          winner.avgLatencyMs,
+
+        reason:
+          options.toolsEnabled
+            ? "best_proven_free_tool_model"
+            : "best_proven_free_general_model",
+      };
+
+    } catch (error: any) {
+      // Adaptive routing must NEVER block AI.
+      console.warn(
+        "⚠️ [FOX Adaptive Router] Model selection failed safely:",
+        error?.message || error
+      );
+
+      return null;
+    }
+  }
+
   private async updateHealth(
     provider: string,
     model: string,
@@ -264,6 +507,74 @@ class AiModelAnalyticsService {
               : 0
           );
 
+        // ==================================================
+        // FOX ADAPTIVE MODEL INTELLIGENCE
+        // ==================================================
+
+        const toolSuccessRate =
+          toolRequests > 0
+            ? Number(
+                (
+                  toolSuccesses /
+                  toolRequests *
+                  100
+                ).toFixed(2)
+              )
+            : null;
+
+        // Reliability carries the highest weight.
+        const reliabilityScore =
+          Math.max(
+            0,
+            Math.min(
+              100,
+              successRate
+            )
+          );
+
+        // Latency scoring:
+        // <= 3 sec   = excellent
+        // <= 8 sec   = good
+        // <= 15 sec  = acceptable
+        // <= 30 sec  = slow
+        // > 30 sec   = very slow
+        let latencyScore = 100;
+
+        if (avgLatencyMs > 30000) {
+          latencyScore = 25;
+        } else if (avgLatencyMs > 15000) {
+          latencyScore = 50;
+        } else if (avgLatencyMs > 8000) {
+          latencyScore = 70;
+        } else if (avgLatencyMs > 3000) {
+          latencyScore = 85;
+        }
+
+        const toolScore =
+          toolSuccessRate === null
+            ? 70
+            : toolSuccessRate;
+
+        // General-purpose score.
+        const adaptiveScore =
+          Number(
+            (
+              reliabilityScore * 0.65 +
+              latencyScore * 0.25 +
+              toolScore * 0.10
+            ).toFixed(2)
+          );
+
+        // Score specifically for operational/tool requests.
+        const adaptiveToolScore =
+          Number(
+            (
+              reliabilityScore * 0.45 +
+              toolScore * 0.40 +
+              latencyScore * 0.15
+            ).toFixed(2)
+          );
+
         let healthStatus =
           "healthy";
 
@@ -279,6 +590,61 @@ class AiModelAnalyticsService {
         ) {
           healthStatus =
             "degraded";
+        }
+
+        // Recommendation consumed later by Adaptive Router V2.
+        let routingRecommendation:
+          | "preferred"
+          | "normal"
+          | "deprioritize"
+          | "cooldown" =
+          "normal";
+
+        if (
+          requests >= 3 &&
+          (
+            successRate < 50 ||
+            adaptiveScore < 45
+          )
+        ) {
+          routingRecommendation =
+            "cooldown";
+        } else if (
+          requests >= 3 &&
+          (
+            successRate < 80 ||
+            adaptiveScore < 65
+          )
+        ) {
+          routingRecommendation =
+            "deprioritize";
+        } else if (
+          requests >= 3 &&
+          adaptiveScore >= 85
+        ) {
+          routingRecommendation =
+            "preferred";
+        }
+
+        // Tool-specific recommendation.
+        let toolRecommendation:
+          | "preferred"
+          | "normal"
+          | "deprioritize" =
+          "normal";
+
+        if (
+          toolRequests >= 3 &&
+          adaptiveToolScore >= 85
+        ) {
+          toolRecommendation =
+            "preferred";
+        } else if (
+          toolRequests >= 3 &&
+          adaptiveToolScore < 65
+        ) {
+          toolRecommendation =
+            "deprioritize";
         }
 
         tx.set(
@@ -301,8 +667,19 @@ class AiModelAnalyticsService {
 
             toolRequests,
             toolSuccesses,
+            toolSuccessRate,
 
             fallbackRequests,
+
+            // FOX Adaptive Intelligence
+            reliabilityScore,
+            latencyScore,
+            toolScore,
+            adaptiveScore,
+            adaptiveToolScore,
+
+            routingRecommendation,
+            toolRecommendation,
 
             healthStatus,
 
